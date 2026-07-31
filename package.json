@@ -1,6 +1,6 @@
 {
   "name": "crisp-focus",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "private": true,
   "scripts": {
     "check": "node --check main.js && node --test tests/regression.test.js",

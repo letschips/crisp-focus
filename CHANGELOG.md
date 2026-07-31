@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.8
+
+- 授权校验机制更新：此版本仅接受新版授权码，旧版授权码需联系重新签发。
+
 ## 1.1.7
 
 - 在线设备校验改用 Obsidian requestUrl（与 ASR/Annotations 一致），修复 Electron/CSP 环境下 fetch 校验失败静默降级的问题。
