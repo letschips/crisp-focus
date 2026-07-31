@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.7
+
+- 在线设备校验改用 Obsidian requestUrl（与 ASR/Annotations 一致），修复 Electron/CSP 环境下 fetch 校验失败静默降级的问题。
+
 ## 1.1.6
 
 - 授权密钥轮换：启用过渡期双公钥校验（新公钥优先，旧公钥兜底），存量授权码不受影响。
