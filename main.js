@@ -1237,7 +1237,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   attachWindow(windowObj) {
     if (!windowObj || this.windowBindings.has(windowObj)) return;
-    const state = { isComposing: false };
+    const state = { isComposing: false, lastCharKeydownAt: 0 };
     const gestureHandler = () => {
       if (!this.settings.focusModeEnabled) return;
       this.audio.handleUserGesture();
@@ -1279,16 +1279,36 @@ class CrispFocusPlugin extends obsidian.Plugin {
       } else if (key === "Backspace" || key === "Delete") {
         this.audio.playBackspaceKey();
       } else if (key.length === 1) {
+        state.lastCharKeydownAt = Date.now();
         this.audio.playCharKey();
       }
+    };
+
+    const beforeInputHandler = (evt) => {
+      gestureHandler();
+      if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
+      if (state.isComposing) return;
+      if (evt.inputType !== "insertText") return;
+      if (Date.now() - state.lastCharKeydownAt < 80) return;
+      const activeEl = windowObj.document.activeElement;
+      const isEditor = activeEl && (
+        activeEl.closest(".cm-editor, .markdown-source-view, .cm-content, .markdown-rendered") ||
+        activeEl.classList.contains("cm-content") ||
+        activeEl.tagName === "TEXTAREA" ||
+        activeEl.getAttribute("contenteditable") === "true"
+      );
+      if (!isEditor) return;
+      this.audio.playCharKey();
     };
 
     windowObj.addEventListener("pointerdown", gestureHandler, { capture: true, passive: true });
     windowObj.addEventListener("touchstart", gestureHandler, { capture: true, passive: true });
     windowObj.addEventListener("compositionstart", compositionStartHandler, { capture: true, passive: true });
     windowObj.addEventListener("compositionend", compositionEndHandler, { capture: true, passive: true });
+    windowObj.addEventListener("beforeinput", beforeInputHandler, { capture: true, passive: true });
     windowObj.addEventListener("keydown", keydownHandler, { capture: true, passive: true });
     this.windowBindings.set(windowObj, {
+      beforeInputHandler,
       compositionEndHandler,
       compositionStartHandler,
       gestureHandler,
@@ -1303,6 +1323,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     windowObj.removeEventListener("touchstart", binding.gestureHandler, { capture: true });
     windowObj.removeEventListener("compositionstart", binding.compositionStartHandler, { capture: true });
     windowObj.removeEventListener("compositionend", binding.compositionEndHandler, { capture: true });
+    windowObj.removeEventListener("beforeinput", binding.beforeInputHandler, { capture: true });
     windowObj.removeEventListener("keydown", binding.keydownHandler, { capture: true });
     this.windowBindings.delete(windowObj);
   }

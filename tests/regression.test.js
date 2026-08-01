@@ -787,3 +787,45 @@ test("Focus mode disables all effects without erasing feature choices", async ()
   assert.equal(audioElements[0].paused, true);
   plugin.onunload();
 });
+
+test("iOS screen keyboard: beforeinput insertText plays character sound without keydown", () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+
+  let charSounds = 0;
+  const plugin = new CrispFocusPlugin();
+  plugin.settings = {
+    focusModeEnabled: true,
+    typewriterAudioEnabled: true,
+  };
+  plugin.audio = {
+    handleUserGesture() {},
+    playCharKey() {
+      charSounds += 1;
+    },
+    playEnterKey() {},
+    playSpaceKey() {},
+    playBackspaceKey() {},
+  };
+  plugin.windowBindings = new Map();
+
+  CrispFocusPlugin.prototype.attachWindow.call(plugin, windowObject);
+
+  // iOS 屏幕键盘：普通字符不触发 keydown，只发 beforeinput/insertText。
+  windowObject.dispatch("beforeinput", { inputType: "insertText" });
+  assert.equal(charSounds, 1, "iOS 字符输入应通过 beforeinput 发声");
+
+  // 桌面端：keydown 字符 + 紧随其后的 beforeinput 只发一次声（80ms 去重）。
+  windowObject.dispatch("keydown", { key: "a", ctrlKey: false, altKey: false, metaKey: false });
+  assert.equal(charSounds, 2, "桌面 keydown 字符应发声");
+  windowObject.dispatch("beforeinput", { inputType: "insertText" });
+  assert.equal(charSounds, 2, "keydown 已发声时 beforeinput 不应重复发声");
+
+  // Enter 仍走 keydown 路径。
+  windowObject.dispatch("keydown", { key: "Enter", ctrlKey: false, altKey: false, metaKey: false });
+  assert.equal(charSounds, 2, "Enter 不应计入字符音效");
+
+  CrispFocusPlugin.prototype.detachWindow.call(plugin, windowObject);
+  windowObject.dispatch("beforeinput", { inputType: "insertText" });
+  assert.equal(charSounds, 2, "detach 后监听器应已清理");
+});
