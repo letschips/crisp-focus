@@ -815,17 +815,25 @@ test("iOS screen keyboard: beforeinput insertText plays character sound without 
   windowObject.dispatch("beforeinput", { inputType: "insertText" });
   assert.equal(charSounds, 1, "iOS 字符输入应通过 beforeinput 发声");
 
+  // iOS 中文输入：组合输入 insertCompositionText 应发声。
+  windowObject.dispatch("compositionstart", {});
+  windowObject.dispatch("beforeinput", { inputType: "insertCompositionText" });
+  assert.equal(charSounds, 2, "iOS 中文组合输入应发声");
+
   // 桌面端：keydown 字符 + 紧随其后的 beforeinput 只发一次声（80ms 去重）。
   windowObject.dispatch("keydown", { key: "a", ctrlKey: false, altKey: false, metaKey: false });
-  assert.equal(charSounds, 2, "桌面 keydown 字符应发声");
+  assert.equal(charSounds, 3, "桌面 keydown 字符应发声");
   windowObject.dispatch("beforeinput", { inputType: "insertText" });
-  assert.equal(charSounds, 2, "keydown 已发声时 beforeinput 不应重复发声");
+  assert.equal(charSounds, 3, "keydown 已发声时 insertText 不应重复发声");
+  windowObject.dispatch("beforeinput", { inputType: "insertCompositionText" });
+  assert.equal(charSounds, 3, "keydown 已发声时 insertCompositionText 不应重复发声");
+  windowObject.dispatch("compositionend", {});
 
   // Enter 仍走 keydown 路径。
   windowObject.dispatch("keydown", { key: "Enter", ctrlKey: false, altKey: false, metaKey: false });
-  assert.equal(charSounds, 2, "Enter 不应计入字符音效");
+  assert.equal(charSounds, 3, "Enter 不应计入字符音效");
 
   CrispFocusPlugin.prototype.detachWindow.call(plugin, windowObject);
   windowObject.dispatch("beforeinput", { inputType: "insertText" });
-  assert.equal(charSounds, 2, "detach 后监听器应已清理");
+  assert.equal(charSounds, 3, "detach 后监听器应已清理");
 });

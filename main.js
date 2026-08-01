@@ -1268,6 +1268,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       const key = evt.key;
       if (state.isComposing) {
         if (key.length === 1 && key !== " ") {
+          state.lastCharKeydownAt = Date.now();
           this.audio.playCharKey();
         }
         return;
@@ -1287,8 +1288,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const beforeInputHandler = (evt) => {
       gestureHandler();
       if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
-      if (state.isComposing) return;
-      if (evt.inputType !== "insertText") return;
+      // iOS 屏幕键盘：英文走 insertText，中文走组合输入 insertCompositionText。
+      if (evt.inputType !== "insertText" && evt.inputType !== "insertCompositionText") return;
       if (Date.now() - state.lastCharKeydownAt < 80) return;
       const activeEl = windowObj.document.activeElement;
       const isEditor = activeEl && (
