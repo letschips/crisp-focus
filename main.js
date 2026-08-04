@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.4)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.11)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -79,8 +79,8 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus") {
           pluginId: targetPluginId
         })
       });
-      if (res.status === 200 && res.json) {
-        const cloudResult = res.json;
+      const cloudResult = res.json;
+      if (cloudResult && typeof cloudResult.valid === "boolean") {
         if (cloudResult.valid === false) {
           return { valid: false, reason: cloudResult.reason || "设备数已达上限" };
         }
