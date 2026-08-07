@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.11)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.12)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -609,6 +609,8 @@ class CrispFocusAudioEngine {
   stopAmbient() {
     if (this.ambientAudioEl) {
       this.ambientAudioEl.pause();
+      this.ambientAudioEl.src = "";
+      this.ambientAudioEl = null;
       this.currentAmbientSound = null;
     }
   }
@@ -1184,6 +1186,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
       id: "toggle-typewriter-audio",
       name: "Toggle sound effects",
       callback: async () => {
+        if (!this.settings.typewriterAudioEnabled) {
+          const check = await verifyLicenseCode(this.settings.licenseCode, "crisp-focus");
+          if (!check.valid) {
+            new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
+            return;
+          }
+        }
         this.settings.typewriterAudioEnabled = !this.settings.typewriterAudioEnabled;
         await this.saveSettings();
         new obsidian.Notice(`Crisp Focus audio ${this.settings.typewriterAudioEnabled ? "enabled" : "muted"}`);
