@@ -318,7 +318,7 @@ test("settings About card exposes the plugin purpose and author", () => {
     "crisp-focus-about__description"
   );
   const author = findByClass(container, "crisp-focus-about__author-link");
-  assert.equal(title.textContent, "About Crisp Focus");
+  assert.equal(title.textContent, "关于 Crisp Focus");
   assert.equal(
     description.textContent,
     "用克制的视觉与声音反馈，帮助你专注进入和完成每一次书写。"

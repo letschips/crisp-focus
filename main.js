@@ -743,7 +743,7 @@ function renderAboutCard(container, pluginName, description) {
 
   const title = document.createElement("h3");
   title.className = "crisp-focus-about__title";
-  title.textContent = `About ${pluginName}`;
+  title.textContent = `关于 ${pluginName}`;
 
   const copy = document.createElement("p");
   copy.className = "crisp-focus-about__description";
@@ -780,8 +780,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       .setHeading();
 
     new obsidian.Setting(containerEl)
-      .setName("Focus mode")
-      .setDesc("Master switch for the animated cursor, typing feedback, and ambient sound.")
+      .setName("专注模式")
+      .setDesc("动效光标、打字音效与环境音的总体开关。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.focusModeEnabled)
@@ -892,8 +892,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     );
 
     new obsidian.Setting(cursorCard)
-      .setName("Enable animated cursor")
-      .setDesc("Smoothly interpolates caret movement across text, line breaks, and selections.")
+      .setName("启用动效光标")
+      .setDesc("光标在文字、换行与选区之间平滑移动。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.animatedCursorEnabled)
@@ -903,8 +903,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(cursorCard)
-      .setName("Cursor speed")
-      .setDesc("The speed of each cursor movement in miliseconds.")
+      .setName("光标速度")
+      .setDesc("每次光标移动的速度（毫秒）。")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.cursorSpeed ?? 80))
@@ -928,8 +928,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(cursorCard)
-      .setName("Blink rate")
-      .setDesc("The length of a full cursor blink cycle in miliseconds.")
+      .setName("闪烁频率")
+      .setDesc("光标完整闪烁一次的时间（毫秒）。")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.blinkRate ?? 1000))
@@ -953,8 +953,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(cursorCard)
-      .setName("Blink count")
-      .setDesc("The limit of blink counts in a sequence. Resetted each time it's moving. Stop blinking when it sets to 0.")
+      .setName("闪烁次数")
+      .setDesc("一次连续闪烁的上限；每次移动后重置，设为 0 时停止闪烁。")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.blinkCount ?? 10))
@@ -985,8 +985,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     );
 
     new obsidian.Setting(audioCard)
-      .setName("Enable sound effects")
-      .setDesc("Play tactile keypress and confirmation sound feedback while typing.")
+      .setName("启用音效")
+      .setDesc("打字时播放触感按键与确认音反馈。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterAudioEnabled)
@@ -1007,8 +1007,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(audioCard)
-      .setName("Sound theme")
-      .setDesc("Choose your preferred audio preset theme for keypress feedback.")
+      .setName("音效主题")
+      .setDesc("选择按键反馈的预设音色。")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("typewriter", "📜 Vintage Typewriter (复古打字机)")
@@ -1031,8 +1031,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(audioCard)
-      .setName("Master volume")
-      .setDesc("Adjust overall keypress and confirmation sound volume.")
+      .setName("主音量")
+      .setDesc("调节按键与确认音的整体音量。")
       .addSlider((slider) =>
         slider
           .setLimits(0, 1, 0.05)
@@ -1045,8 +1045,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(audioCard)
-      .setName("Carriage return bell")
-      .setDesc("Ring a bell or chime when pressing Enter key.")
+      .setName("回车提示音")
+      .setDesc("按 Enter 时播放铃声或提示音。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterBellEnabled)
@@ -1064,8 +1064,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     );
 
     new obsidian.Setting(ambientCard)
-      .setName("Background ambient sound")
-      .setDesc("Choose an HD background ambient soundscape.")
+      .setName("背景环境音")
+      .setDesc("选择高清背景环境音。")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("off", "Off (关闭)")
@@ -1092,8 +1092,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(ambientCard)
-      .setName("Ambient sound volume")
-      .setDesc("Adjust background ambient sound volume.")
+      .setName("环境音音量")
+      .setDesc("调节背景环境音音量。")
       .addSlider((slider) =>
         slider
           .setLimits(0, 1, 0.05)
