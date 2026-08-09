@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.12)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.1.14)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -9,6 +9,17 @@ const { requestUrl } = obsidian;
 const CRISP_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAiz41HIDpD59SH3DjKnovUO+EEhTJXjvmiug/ev9t4ZQ=
 -----END PUBLIC KEY-----`;
+
+const CRISP_LICENSE_PRODUCTS = [
+  "Crisp Suite",
+  "Crisp Organize",
+  "Crisp ASR",
+  "Crisp Annotations",
+  "Crisp File Explorer",
+  "Crisp Focus",
+  "Crisp Reading Rail",
+  "Crisp Base",
+];
 
 
 function base64UrlToUint8Array(base64url) {
@@ -47,8 +58,7 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus") {
   try {
     const payloadJson = new TextDecoder().decode(base64UrlToUint8Array(payloadBase64));
     const payload = JSON.parse(payloadJson);
-    const validProducts = ["Crisp Suite", "Crisp ASR", "Crisp Annotations", "Crisp File Explorer", "Crisp Focus", "Crisp Reading Rail"];
-    if (!validProducts.includes(payload.product)) return { valid: false, reason: "授权码不属于 Crisp 系列插件" };
+    if (!CRISP_LICENSE_PRODUCTS.includes(payload.product)) return { valid: false, reason: "授权码不属于 Crisp 系列插件" };
     const features = Array.isArray(payload.features) ? payload.features : [];
     if (!features.includes("all") && !features.includes(targetPluginId)) {
       return { valid: false, reason: `该授权码未包含 ${targetPluginId} 权限` };
@@ -886,8 +896,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     // Card 1: Smooth Animated Cursor
     const cursorCard = createGroup(
-      "Animated cursor",
-      "Configure spring-eased caret movement, transition speed, and blink timing.",
+      "动效光标",
+      "设置光标的弹簧移动、过渡速度与闪烁节奏。",
       true
     );
 
@@ -919,7 +929,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("Reset to default (80)")
+          .setTooltip("恢复默认值（80）")
           .onClick(async () => {
             this.plugin.settings.cursorSpeed = 80;
             await this.plugin.saveSettings();
@@ -944,7 +954,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("Reset to default (1000)")
+          .setTooltip("恢复默认值（1000）")
           .onClick(async () => {
             this.plugin.settings.blinkRate = 1000;
             await this.plugin.saveSettings();
@@ -969,7 +979,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("Reset to default (10)")
+          .setTooltip("恢复默认值（10）")
           .onClick(async () => {
             this.plugin.settings.blinkCount = 10;
             await this.plugin.saveSettings();
@@ -979,8 +989,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     // Card 2: Multi-Theme Audio Engine
     const audioCard = createGroup(
-      "Sound feedback",
-      "Tactile keypress themes and an optional carriage return bell.",
+      "声音反馈",
+      "选择有触感的按键音主题，并可启用回车提示音。",
       false
     );
 
@@ -1058,8 +1068,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     // Card 3: Zen Ambient Audio Generator
     const ambientCard = createGroup(
-      "Ambient sound",
-      "Play a continuous local soundscape while Focus mode is active.",
+      "环境音",
+      "在专注模式开启时循环播放本地环境音。",
       false
     );
 
@@ -1195,7 +1205,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
         }
         this.settings.typewriterAudioEnabled = !this.settings.typewriterAudioEnabled;
         await this.saveSettings();
-        new obsidian.Notice(`Crisp Focus audio ${this.settings.typewriterAudioEnabled ? "enabled" : "muted"}`);
+        new obsidian.Notice(`Crisp Focus 音效已${this.settings.typewriterAudioEnabled ? "开启" : "静音"}`);
       }
     });
   }

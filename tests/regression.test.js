@@ -7,6 +7,20 @@ const vm = require("node:vm");
 const pluginPath = path.join(__dirname, "..", "main.js");
 const stylesPath = path.join(__dirname, "..", "styles.css");
 
+test("runtime and release metadata versions stay synchronized", () => {
+  const root = path.join(__dirname, "..");
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+  const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const versions = JSON.parse(fs.readFileSync(path.join(root, "versions.json"), "utf8"));
+  const runtime = fs.readFileSync(pluginPath, "utf8");
+  const styles = fs.readFileSync(stylesPath, "utf8");
+
+  assert.equal(packageJson.version, manifest.version);
+  assert.equal(versions[manifest.version], manifest.minAppVersion);
+  assert.match(runtime, new RegExp(`\\(v${manifest.version.replaceAll(".", "\\.")}\\)`));
+  assert.match(styles, new RegExp(`\\(v${manifest.version.replaceAll(".", "\\.")}\\)`));
+});
+
 function createClassList() {
   const values = new Set();
   return {
@@ -223,6 +237,7 @@ module.exports.__test = {
   ensureCursorLayerPatched,
   patchCursorLayer,
   renderAboutCard: typeof renderAboutCard === "function" ? renderAboutCard : undefined,
+  CRISP_LICENSE_PRODUCTS,
 };`;
   const timers = [];
   const audioElements = [];
@@ -329,6 +344,20 @@ test("settings About card exposes the plugin purpose and author", () => {
   assert.equal(author.rel, "noopener noreferrer");
 }
 );
+
+test("license compatibility includes the complete current Crisp family", () => {
+  const { CRISP_LICENSE_PRODUCTS } = loadPluginInternals();
+  assert.deepEqual(Array.from(CRISP_LICENSE_PRODUCTS), [
+    "Crisp Suite",
+    "Crisp Organize",
+    "Crisp ASR",
+    "Crisp Annotations",
+    "Crisp File Explorer",
+    "Crisp Focus",
+    "Crisp Reading Rail",
+    "Crisp Base",
+  ]);
+});
 
 function createPluginApp(windowObject) {
   const workspaceListeners = new Map();
