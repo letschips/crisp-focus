@@ -235,6 +235,7 @@ module.exports.__test = {
   CrispFocusAudioEngine,
   CrispFocusLicenseManager: typeof CrispFocusLicenseManager === "function" ? CrispFocusLicenseManager : undefined,
   CrispFocusPlugin,
+  FOCUS_SCENES: typeof FOCUS_SCENES === "object" ? FOCUS_SCENES : undefined,
   ensureCursorLayerPatched,
   patchCursorLayer,
   renderAboutCard: typeof renderAboutCard === "function" ? renderAboutCard : undefined,
@@ -427,6 +428,90 @@ test("offline license fallback is limited to the verified grace period", async (
   assert.equal((await recent.verify()).valid, true);
   assert.equal((await stale.verify()).valid, false);
   assert.match(stale.getStatus().reason, /联网/);
+});
+
+test("applying a licensed focus scene updates its complete preset atomically", async () => {
+  const { CrispFocusPlugin, FOCUS_SCENES } = loadPluginInternals();
+  assert.equal(typeof FOCUS_SCENES, "object");
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({});
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  const result = await plugin.applyScene("rainy-writing");
+
+  assert.equal(result.applied, true);
+  assert.deepEqual(
+    {
+      activeSceneId: plugin.settings.activeSceneId,
+      ambientSound: plugin.settings.ambientSound,
+      ambientVolume: plugin.settings.ambientVolume,
+      animatedCursorEnabled: plugin.settings.animatedCursorEnabled,
+      cursorSpeed: plugin.settings.cursorSpeed,
+      focusModeEnabled: plugin.settings.focusModeEnabled,
+      soundTheme: plugin.settings.soundTheme,
+      typewriterAudioEnabled: plugin.settings.typewriterAudioEnabled,
+      typewriterBellEnabled: plugin.settings.typewriterBellEnabled,
+      typewriterVolume: plugin.settings.typewriterVolume,
+    },
+    {
+      activeSceneId: "rainy-writing",
+      ambientSound: "rain",
+      ambientVolume: 0.45,
+      animatedCursorEnabled: true,
+      cursorSpeed: 95,
+      focusModeEnabled: true,
+      soundTheme: "raindrop",
+      typewriterAudioEnabled: true,
+      typewriterBellEnabled: false,
+      typewriterVolume: 0.35,
+    }
+  );
+  plugin.onunload();
+});
+
+test("an unlicensed paid scene is rejected without changing the current setup", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    activeSceneId: "silent-writing",
+    ambientSound: "off",
+    cursorSpeed: 80,
+    typewriterAudioEnabled: false,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  const before = JSON.stringify(plugin.settings);
+
+  const result = await plugin.applyScene("vintage-typewriter");
+
+  assert.equal(result.applied, false);
+  assert.match(result.reason, /激活/);
+  assert.equal(JSON.stringify(plugin.settings), before);
+  plugin.onunload();
+});
+
+test("the free silent scene remains available without a license", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ ambientSound: "rain", typewriterAudioEnabled: true });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  const result = await plugin.applyScene("silent-writing");
+
+  assert.equal(result.applied, true);
+  assert.equal(plugin.settings.activeSceneId, "silent-writing");
+  assert.equal(plugin.settings.typewriterAudioEnabled, false);
+  assert.equal(plugin.settings.ambientSound, "off");
+  plugin.onunload();
 });
 
 function createPluginApp(windowObject) {

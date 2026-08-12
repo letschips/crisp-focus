@@ -6,12 +6,21 @@ ambient soundscapes to Obsidian.
 ## Features
 
 - One Focus mode master switch that preserves individual feature choices.
+- Four atomic Focus scenes for silent, typewriter, rainy, and ocean writing.
 - Adjustable animated cursor with reduced-motion support.
 - Five synthesized typing themes with a shared output limiter.
 - Four bundled local ambient soundscapes with normalized loudness.
 - IME-aware typing feedback and pop-out window support.
 - Local Ed25519 signature validation with online device verification.
 - No analytics or telemetry.
+
+## Focus scenes
+
+Choose a scene from the settings page or the command palette. A scene applies
+its cursor, typing feedback, and ambient sound choices as one atomic preset.
+`Silent writing` is available without activation. Scenes that contain paid
+audio stay locked until the current license is verified. Changing an
+individual scene-controlled setting marks the setup as `Custom`.
 
 ## License verification and privacy
 
