@@ -7,6 +7,7 @@ ambient soundscapes to Obsidian.
 
 - One Focus mode master switch that preserves individual feature choices.
 - Four atomic Focus scenes for silent, typewriter, rainy, and ocean writing.
+- Restorable 1–240 minute focus sessions with pause, resume, and status-bar controls.
 - Adjustable animated cursor with reduced-motion support.
 - Five synthesized typing themes with a shared output limiter.
 - Four bundled local ambient soundscapes with normalized loudness.
@@ -21,6 +22,14 @@ its cursor, typing feedback, and ambient sound choices as one atomic preset.
 `Silent writing` is available without activation. Scenes that contain paid
 audio stay locked until the current license is verified. Changing an
 individual scene-controlled setting marks the setup as `Custom`.
+
+## Focus sessions
+
+Start a custom-duration session from settings, use the 25/50-minute command
+palette shortcuts, or click the `Focus` status-bar item. The status bar shows
+the remaining time and toggles pause/resume. Session state is stored in the
+current vault so an unfinished countdown survives plugin reloads. Completing
+or stopping a session turns Focus mode off and stops ambient audio.
 
 ## License verification and privacy
 

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.2.0)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -880,6 +880,136 @@ function sceneRequiresLicense(scene) {
   return scene.settings.typewriterAudioEnabled || scene.settings.ambientSound !== "off";
 }
 
+class FocusSessionController {
+  constructor(options = {}) {
+    this.now = options.now || (() => Date.now());
+    this.setInterval = options.setInterval || ((callback, delay) => setInterval(callback, delay));
+    this.clearInterval = options.clearInterval || ((timer) => clearInterval(timer));
+    this.onUpdate = options.onUpdate || (() => {});
+    this.onComplete = options.onComplete || (() => {});
+    this.timer = null;
+    this.state = { status: "idle", endAt: 0, remainingMs: 0 };
+  }
+
+  getSnapshot() {
+    return { ...this.state };
+  }
+
+  emit(reason) {
+    this.onUpdate(this.getSnapshot(), reason);
+  }
+
+  schedule() {
+    this.clearTimer();
+    this.timer = this.setInterval(() => this.tick(), 1000);
+  }
+
+  clearTimer() {
+    if (this.timer !== null) {
+      this.clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  start(minutes) {
+    const durationMinutes = Math.max(1, Math.min(240, Math.round(Number(minutes) || 25)));
+    const durationMs = durationMinutes * 60 * 1000;
+    this.state = {
+      status: "running",
+      endAt: this.now() + durationMs,
+      remainingMs: durationMs,
+    };
+    this.schedule();
+    this.emit("start");
+    return this.getSnapshot();
+  }
+
+  tick() {
+    if (this.state.status !== "running") return this.getSnapshot();
+    const remainingMs = Math.max(0, this.state.endAt - this.now());
+    if (remainingMs === 0) {
+      this.complete();
+      return this.getSnapshot();
+    }
+    this.state = { ...this.state, remainingMs };
+    this.emit("tick");
+    return this.getSnapshot();
+  }
+
+  pause() {
+    if (this.state.status !== "running") return this.getSnapshot();
+    const remainingMs = Math.max(0, this.state.endAt - this.now());
+    if (remainingMs === 0) {
+      this.complete();
+      return this.getSnapshot();
+    }
+    this.clearTimer();
+    this.state = { status: "paused", endAt: 0, remainingMs };
+    this.emit("pause");
+    return this.getSnapshot();
+  }
+
+  resume() {
+    if (this.state.status !== "paused" || this.state.remainingMs <= 0) {
+      return this.getSnapshot();
+    }
+    this.state = {
+      status: "running",
+      endAt: this.now() + this.state.remainingMs,
+      remainingMs: this.state.remainingMs,
+    };
+    this.schedule();
+    this.emit("resume");
+    return this.getSnapshot();
+  }
+
+  stop() {
+    this.clearTimer();
+    this.state = { status: "idle", endAt: 0, remainingMs: 0 };
+    this.emit("stop");
+    return this.getSnapshot();
+  }
+
+  complete() {
+    if (this.state.status === "idle") return;
+    this.clearTimer();
+    this.state = { status: "idle", endAt: 0, remainingMs: 0 };
+    this.emit("complete");
+    this.onComplete();
+  }
+
+  restore(savedState) {
+    if (!savedState || typeof savedState !== "object") return this.getSnapshot();
+    if (savedState.status === "running") {
+      const endAt = Number(savedState.endAt) || 0;
+      const remainingMs = Math.max(0, endAt - this.now());
+      if (remainingMs > 0) {
+        this.state = { status: "running", endAt, remainingMs };
+        this.schedule();
+        this.emit("restore");
+      }
+    } else if (savedState.status === "paused") {
+      const remainingMs = Math.max(0, Number(savedState.remainingMs) || 0);
+      if (remainingMs > 0) {
+        this.state = { status: "paused", endAt: 0, remainingMs };
+        this.emit("restore");
+      }
+    }
+    return this.getSnapshot();
+  }
+
+  destroy() {
+    this.clearTimer();
+  }
+}
+
+function formatSessionRemaining(remainingMs) {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 const DEFAULT_SETTINGS = {
   activeSceneId: "silent-writing",
   focusModeEnabled: true,
@@ -894,7 +1024,9 @@ const DEFAULT_SETTINGS = {
   ambientSound: "off", // off, rain, campfire, ocean, wind
   ambientVolume: 0.65,
   licenseCode: "",
-  licenseLastOnlineAt: 0
+  licenseLastOnlineAt: 0,
+  sessionDurationMinutes: 25,
+  sessionState: { status: "idle", endAt: 0, remainingMs: 0 }
 };
 
 function renderAboutCard(container, pluginName, description) {
@@ -1025,6 +1157,56 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
             this.display();
           });
       });
+
+    const sessionGroup = createGroup(
+      "专注会话",
+      "用状态栏倒计时完成一段有边界的写作时间。",
+      true
+    );
+    const sessionSnapshot = this.plugin.session.getSnapshot();
+
+    new obsidian.Setting(sessionGroup)
+      .setName("默认时长")
+      .setDesc("设置 1–240 分钟；命令面板另提供 25 与 50 分钟快捷入口。")
+      .addText((text) => text
+        .setValue(String(this.plugin.settings.sessionDurationMinutes || 25))
+        .onChange(async (value) => {
+          const minutes = Math.max(1, Math.min(240, Math.round(Number(value) || 25)));
+          this.plugin.settings.sessionDurationMinutes = minutes;
+          await this.plugin.saveSettings();
+          this.plugin.renderSessionStatus(this.plugin.session.getSnapshot());
+        }));
+
+    new obsidian.Setting(sessionGroup)
+      .setName("会话控制")
+      .setDesc(sessionSnapshot.status === "idle"
+        ? "当前没有进行中的会话。"
+        : `剩余 ${formatSessionRemaining(sessionSnapshot.remainingMs)}`)
+      .addButton((button) => button
+        .setButtonText(sessionSnapshot.status === "idle" ? "开始" : "重新开始")
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.startFocusSession(this.plugin.settings.sessionDurationMinutes);
+          this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText(sessionSnapshot.status === "paused" ? "继续" : "暂停")
+        .setDisabled(sessionSnapshot.status === "idle")
+        .onClick(async () => {
+          if (sessionSnapshot.status === "paused") {
+            await this.plugin.resumeFocusSession();
+          } else {
+            await this.plugin.pauseFocusSession();
+          }
+          this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText("结束")
+        .setDisabled(sessionSnapshot.status === "idle")
+        .onClick(async () => {
+          await this.plugin.stopFocusSession();
+          this.display();
+        }));
 
     const licenseGroup = createGroup(
       "软件授权",
@@ -1347,6 +1529,29 @@ class CrispFocusPlugin extends obsidian.Plugin {
       () => this.settings.ambientVolume ?? 0.65,
       winObj
     );
+    this.statusBarEl = this.addStatusBarItem();
+    this.statusBarEl.classList.add("crisp-focus-session-status");
+    this.statusBarEl.setAttr("aria-label", "Crisp Focus 专注会话");
+    this.statusBarEl.addEventListener("click", () => {
+      const status = this.session.getSnapshot().status;
+      if (status === "running") {
+        void this.pauseFocusSession();
+      } else if (status === "paused") {
+        void this.resumeFocusSession();
+      } else {
+        void this.startFocusSession(this.settings.sessionDurationMinutes);
+      }
+    });
+    this.session = new FocusSessionController({
+      setInterval: (callback, delay) => winObj.setInterval(callback, delay),
+      clearInterval: (timer) => winObj.clearInterval(timer),
+      onUpdate: (snapshot, reason) => this.onSessionUpdate(snapshot, reason),
+      onComplete: () => {
+        void this.completeFocusSession();
+      },
+    });
+    this.session.restore(this.settings.sessionState);
+    this.renderSessionStatus(this.session.getSnapshot());
     this.windowBindings = new Map();
     this.attachWindow(winObj);
     this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, windowObj) => {
@@ -1425,6 +1630,29 @@ class CrispFocusPlugin extends obsidian.Plugin {
         },
       });
     });
+
+    this.addCommand({
+      id: "start-focus-session-25",
+      name: "Start 25-minute focus session",
+      callback: () => this.startFocusSession(25),
+    });
+    this.addCommand({
+      id: "start-focus-session-50",
+      name: "Start 50-minute focus session",
+      callback: () => this.startFocusSession(50),
+    });
+    this.addCommand({
+      id: "pause-resume-focus-session",
+      name: "Pause or resume focus session",
+      callback: () => this.session.getSnapshot().status === "running"
+        ? this.pauseFocusSession()
+        : this.resumeFocusSession(),
+    });
+    this.addCommand({
+      id: "stop-focus-session",
+      name: "Stop focus session",
+      callback: () => this.stopFocusSession(),
+    });
   }
 
   onunload() {
@@ -1446,6 +1674,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     }
     if (this.audio) {
       this.audio.destroy();
+    }
+    if (this.session) {
+      this.session.destroy();
     }
   }
 
@@ -1502,6 +1733,71 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   markSceneCustom() {
     this.settings.activeSceneId = "custom";
+  }
+
+  onSessionUpdate(snapshot, reason) {
+    this.settings.sessionState = snapshot;
+    this.renderSessionStatus(snapshot);
+    if (reason !== "tick") {
+      void this.saveSettings();
+    }
+  }
+
+  renderSessionStatus(snapshot) {
+    if (!this.statusBarEl) return;
+    this.statusBarEl.classList.toggle("is-running", snapshot.status === "running");
+    this.statusBarEl.classList.toggle("is-paused", snapshot.status === "paused");
+    if (snapshot.status === "running") {
+      this.statusBarEl.setText(`专注 ${formatSessionRemaining(snapshot.remainingMs)}`);
+      this.statusBarEl.title = "点击暂停专注会话";
+    } else if (snapshot.status === "paused") {
+      this.statusBarEl.setText(`专注 暂停 ${formatSessionRemaining(snapshot.remainingMs)}`);
+      this.statusBarEl.title = "点击继续专注会话";
+    } else {
+      this.statusBarEl.setText("专注");
+      this.statusBarEl.title = `点击开始 ${this.settings.sessionDurationMinutes} 分钟专注会话`;
+    }
+  }
+
+  async startFocusSession(minutes = this.settings.sessionDurationMinutes) {
+    const duration = Math.max(1, Math.min(240, Math.round(Number(minutes) || 25)));
+    this.settings.sessionDurationMinutes = duration;
+    await this.setFocusModeEnabled(true);
+    this.session.start(duration);
+    await this.saveSettings();
+    return this.session.getSnapshot();
+  }
+
+  async pauseFocusSession() {
+    const snapshot = this.session.pause();
+    if (snapshot.status === "paused" && this.audio) {
+      this.audio.stopAmbient();
+    }
+    await this.saveSettings();
+    return snapshot;
+  }
+
+  async resumeFocusSession() {
+    const snapshot = this.session.resume();
+    if (snapshot.status === "running") {
+      await this.setFocusModeEnabled(true);
+      this.audio.updateAmbient();
+    }
+    await this.saveSettings();
+    return snapshot;
+  }
+
+  async stopFocusSession() {
+    const snapshot = this.session.stop();
+    await this.setFocusModeEnabled(false);
+    await this.saveSettings();
+    return snapshot;
+  }
+
+  async completeFocusSession() {
+    await this.setFocusModeEnabled(false);
+    await this.saveSettings();
+    new obsidian.Notice("Crisp Focus 专注会话完成");
   }
 
   clearCursorStyles() {

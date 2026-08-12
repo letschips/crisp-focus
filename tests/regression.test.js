@@ -185,6 +185,10 @@ function createWindow() {
       callback();
       return 1;
     },
+    setInterval() {
+      return 1;
+    },
+    clearInterval() {},
     setTimeout(callback) {
       callback();
       return 1;
@@ -219,6 +223,21 @@ function createObsidianMock() {
     addCommand() {}
     addSettingTab() {}
     registerEvent() {}
+    addStatusBarItem() {
+      return {
+        classList: createClassList(),
+        textContent: "",
+        title: "",
+        addEventListener() {},
+        remove() {},
+        setAttr(name, value) {
+          this[name] = value;
+        },
+        setText(value) {
+          this.textContent = value;
+        },
+      };
+    }
   }
   return {
     MarkdownView: class MarkdownView {},
@@ -235,6 +254,7 @@ module.exports.__test = {
   CrispFocusAudioEngine,
   CrispFocusLicenseManager: typeof CrispFocusLicenseManager === "function" ? CrispFocusLicenseManager : undefined,
   CrispFocusPlugin,
+  FocusSessionController: typeof FocusSessionController === "function" ? FocusSessionController : undefined,
   FOCUS_SCENES: typeof FOCUS_SCENES === "object" ? FOCUS_SCENES : undefined,
   ensureCursorLayerPatched,
   patchCursorLayer,
@@ -511,6 +531,114 @@ test("the free silent scene remains available without a license", async () => {
   assert.equal(plugin.settings.activeSceneId, "silent-writing");
   assert.equal(plugin.settings.typewriterAudioEnabled, false);
   assert.equal(plugin.settings.ambientSound, "off");
+  plugin.onunload();
+});
+
+test("focus session countdown pauses, resumes, and completes exactly once", () => {
+  const { FocusSessionController } = loadPluginInternals();
+  assert.equal(typeof FocusSessionController, "function");
+  let now = 0;
+  let intervalCallback = null;
+  let completions = 0;
+  const updates = [];
+  const controller = new FocusSessionController({
+    clearInterval() {
+      intervalCallback = null;
+    },
+    now: () => now,
+    onComplete() {
+      completions += 1;
+    },
+    onUpdate(snapshot) {
+      updates.push(snapshot);
+    },
+    setInterval(callback) {
+      intervalCallback = callback;
+      return 1;
+    },
+  });
+
+  controller.start(1);
+  assert.deepEqual({ ...controller.getSnapshot() }, {
+    status: "running",
+    endAt: 60_000,
+    remainingMs: 60_000,
+  });
+
+  now = 20_000;
+  intervalCallback();
+  controller.pause();
+  assert.deepEqual({ ...controller.getSnapshot() }, {
+    status: "paused",
+    endAt: 0,
+    remainingMs: 40_000,
+  });
+
+  now = 50_000;
+  controller.resume();
+  assert.equal(controller.getSnapshot().endAt, 90_000);
+  now = 90_000;
+  intervalCallback();
+
+  assert.deepEqual({ ...controller.getSnapshot() }, {
+    status: "idle",
+    endAt: 0,
+    remainingMs: 0,
+  });
+  assert.equal(completions, 1);
+  assert.equal(updates.at(-1).status, "idle");
+  controller.tick();
+  assert.equal(completions, 1);
+});
+
+test("focus session restores an unfinished persisted countdown", () => {
+  const { FocusSessionController } = loadPluginInternals();
+  assert.equal(typeof FocusSessionController, "function");
+  let intervalRegistered = false;
+  const controller = new FocusSessionController({
+    clearInterval() {},
+    now: () => 40_000,
+    setInterval() {
+      intervalRegistered = true;
+      return 1;
+    },
+  });
+
+  controller.restore({ status: "running", endAt: 100_000, remainingMs: 0 });
+
+  assert.deepEqual({ ...controller.getSnapshot() }, {
+    status: "running",
+    endAt: 100_000,
+    remainingMs: 60_000,
+  });
+  assert.equal(intervalRegistered, true);
+});
+
+test("plugin session controls keep focus mode, persisted state, and status text synchronized", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ sessionDurationMinutes: 25 });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  await plugin.startFocusSession(25);
+  assert.equal(plugin.settings.focusModeEnabled, true);
+  assert.equal(plugin.settings.sessionState.status, "running");
+  assert.equal(plugin.statusBarEl.textContent, "专注 25:00");
+
+  await plugin.pauseFocusSession();
+  assert.equal(plugin.settings.sessionState.status, "paused");
+  assert.match(plugin.statusBarEl.textContent, /暂停/);
+
+  await plugin.resumeFocusSession();
+  assert.equal(plugin.settings.sessionState.status, "running");
+
+  await plugin.stopFocusSession();
+  assert.equal(plugin.settings.focusModeEnabled, false);
+  assert.equal(plugin.settings.sessionState.status, "idle");
+  assert.equal(plugin.statusBarEl.textContent, "专注");
   plugin.onunload();
 });
 

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.2.0)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -9,6 +9,20 @@
   --crisp-focus-blink-rate: 1000ms;
   --crisp-focus-blink-count: 10;
   --crisp-focus-blink-easing: ease-in-out;
+}
+
+.crisp-focus-session-status {
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.16s ease, background 0.16s ease;
+}
+
+.crisp-focus-session-status.is-running {
+  color: var(--text-accent);
+}
+
+.crisp-focus-session-status.is-paused {
+  color: var(--text-muted);
 }
 
 /* Hide native CM6 static text caret */
