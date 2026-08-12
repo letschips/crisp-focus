@@ -10,7 +10,20 @@ ambient soundscapes to Obsidian.
 - Five synthesized typing themes with a shared output limiter.
 - Four bundled local ambient soundscapes with normalized loudness.
 - IME-aware typing feedback and pop-out window support.
-- No network requests, accounts, analytics, or telemetry.
+- Local Ed25519 signature validation with online device verification.
+- No analytics or telemetry.
+
+## License verification and privacy
+
+The animated cursor is available without activation. Typing feedback and
+ambient soundscapes require a valid Crisp license. License signatures are
+validated locally first. The plugin then sends the license code, the current
+Obsidian app/device identifier, and the plugin ID to the Crisp license service
+to register or verify the device. If the service is temporarily unreachable,
+a previously verified license receives a seven-day offline grace period.
+
+The license code is stored only in the current vault's plugin `data.json`.
+Keep that file private and exclude it from shared archives.
 
 ## Development
 
@@ -23,6 +36,5 @@ The runtime release contains `main.js`, `manifest.json`, `styles.css`, and the
 
 ## Distribution checklist
 
-Before public distribution, add the chosen source-code license and verify that
-all bundled audio files have redistribution rights compatible with that
-license.
+Before public distribution, verify that all bundled audio files have
+redistribution rights compatible with the repository's source-code license.

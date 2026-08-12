@@ -1,9 +1,9 @@
 {
   "id": "crisp-focus",
   "name": "Crisp Focus",
-  "version": "1.1.14",
-  "minAppVersion": "0.15.0",
-  "description": "Smooth physics cursor animation, tactile multi-theme audio, and HD MP3 ambient soundscapes for Obsidian by letschips.",
+  "version": "1.1.15",
+  "minAppVersion": "1.9.10",
+  "description": "Spring-eased cursor motion, tactile multi-theme audio, and local ambient soundscapes for focused writing.",
   "author": "letschips",
   "authorUrl": "https://github.com/letschips",
   "isDesktopOnly": false
