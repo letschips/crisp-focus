@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.0)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -115,16 +115,14 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
         return { valid: true, payload, message: cloudResult.message, source: "online" };
       }
     } catch (netErr) {
-      return { valid: true, payload, source: "offline" };
+      return { valid: true, payload, message: "离线验证成功", source: "offline" };
     }
 
-    return { valid: true, payload, source: "offline" };
+    return { valid: true, payload, message: "离线验证成功", source: "offline" };
   } catch (e) {
     return { valid: false, reason: `解析授权码失败: ${e.message}` };
   }
 }
-
-const LICENSE_OFFLINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
 class CrispFocusLicenseManager {
   constructor(app, settings, options = {}) {
@@ -132,7 +130,6 @@ class CrispFocusLicenseManager {
     this.settings = settings;
     this.verifier = options.verifier || verifyLicenseCode;
     this.now = options.now || (() => Date.now());
-    this.offlineGraceMs = options.offlineGraceMs || LICENSE_OFFLINE_GRACE_MS;
     this.onEntitlementLost = options.onEntitlementLost || (() => {});
     this.windowObj = options.windowObj || window;
     this.status = { valid: false, reason: "尚未验证" };
@@ -157,16 +154,6 @@ class CrispFocusLicenseManager {
 
     if (result.valid && result.source === "online") {
       this.settings.licenseLastOnlineAt = this.now();
-    } else if (result.valid && result.source === "offline") {
-      const lastOnlineAt = Number(this.settings.licenseLastOnlineAt) || 0;
-      const withinGrace = lastOnlineAt > 0 && this.now() - lastOnlineAt <= this.offlineGraceMs;
-      if (!withinGrace) {
-        result = {
-          valid: false,
-          reason: "离线宽限期已结束，请联网完成一次授权验证",
-          source: "offline",
-        };
-      }
     }
 
     this.status = result;
@@ -1210,7 +1197,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const licenseGroup = createGroup(
       "软件授权",
-      "本地签名验证与在线设备校验，断网后提供 7 天宽限期",
+      "本地 Ed25519 签名验证与在线设备校验，支持离线使用",
       true
     );
 
@@ -1224,7 +1211,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       const expiry = licenseStatus.payload.expiresAt
         ? `，到期时间: ${String(licenseStatus.payload.expiresAt).split("T")[0]}`
         : "";
-      const verification = licenseStatus.source === "offline" ? "离线宽限" : "在线验证";
+      const verification = licenseStatus.source === "offline" ? "离线验证" : "在线验证";
       statusSetting.setDesc(`✅ 已激活（${verification}，授权给: ${owner}${expiry}）`);
     } else if (this.plugin.settings.licenseCode) {
       statusSetting.setDesc(`❌ 未激活（${licenseStatus.reason || "授权码无效"}）`);

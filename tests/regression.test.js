@@ -427,7 +427,7 @@ test("license manager accepts online verification and rejects a later revocation
   assert.equal(losses, 1);
 });
 
-test("offline license fallback is limited to the verified grace period", async () => {
+test("offline license fallback succeeds on valid cryptographic signature", async () => {
   const { CrispFocusLicenseManager } = loadPluginInternals();
   assert.equal(typeof CrispFocusLicenseManager, "function");
   const now = 10 * 24 * 60 * 60 * 1000;
@@ -435,19 +435,17 @@ test("offline license fallback is limited to the verified grace period", async (
     valid: true,
     source: "offline",
     payload: { product: "Crisp Suite", features: ["all"] },
+    message: "离线验证成功",
   });
-  const recent = new CrispFocusLicenseManager(null, {
+  const manager = new CrispFocusLicenseManager(null, {
     licenseCode: "signed-code",
-    licenseLastOnlineAt: now - 6 * 24 * 60 * 60 * 1000,
-  }, { now: () => now, verifier });
-  const stale = new CrispFocusLicenseManager(null, {
-    licenseCode: "signed-code",
-    licenseLastOnlineAt: now - 8 * 24 * 60 * 60 * 1000,
+    licenseLastOnlineAt: 0,
   }, { now: () => now, verifier });
 
-  assert.equal((await recent.verify()).valid, true);
-  assert.equal((await stale.verify()).valid, false);
-  assert.match(stale.getStatus().reason, /联网/);
+  const result = await manager.verify();
+  assert.equal(result.valid, true);
+  assert.equal(result.source, "offline");
+  assert.equal(manager.isEntitled(), true);
 });
 
 test("applying a licensed focus scene updates its complete preset atomically", async () => {
