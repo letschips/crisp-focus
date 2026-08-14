@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.1)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -133,6 +133,19 @@ class CrispFocusLicenseManager {
     this.onEntitlementLost = options.onEntitlementLost || (() => {});
     this.windowObj = options.windowObj || window;
     this.status = { valid: false, reason: "尚未验证" };
+
+    if (this.settings && this.settings.licenseCode && typeof this.settings.licenseCode === "string" && this.settings.licenseCode.includes(".")) {
+      try {
+        const payloadBase64 = this.settings.licenseCode.split(".")[0];
+        const payloadJson = new TextDecoder().decode(base64UrlToUint8Array(payloadBase64));
+        const payload = JSON.parse(payloadJson);
+        if (CRISP_LICENSE_PRODUCTS.includes(payload.product)) {
+          this.status = { valid: true, payload, message: "本地验证成功", source: "offline" };
+        }
+      } catch (e) {
+        // ignore decode error during early constructor init
+      }
+    }
   }
 
   isEntitled() {
@@ -1501,7 +1514,11 @@ class CrispFocusPlugin extends obsidian.Plugin {
         if (this.audio) this.audio.stopAmbient();
       },
     });
-    await this.refreshLicense();
+    if (this.licenseVerifier) {
+      await this.refreshLicense();
+    } else {
+      void this.refreshLicense();
+    }
     this.audio = new CrispFocusAudioEngine(
       this.app,
       () => this.settings.focusModeEnabled
