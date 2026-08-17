@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.2)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.3)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -713,8 +713,140 @@ class CrispFocusAudioEngine {
 }
 
 // --------------------------------------------------------------------------
-// 2. CodeMirror 6 Native Cursor Layer Smooth Motion Hook
+// 2. CodeMirror 6 Native Cursor Layer Smooth Motion Hook (GPU-Accelerated Engine)
 // --------------------------------------------------------------------------
+class CrispCursorMarker {
+  constructor(className, left, top, height, useTransform = true) {
+    this.className = className;
+    this.left = Math.round(left);
+    this.top = Math.round(top);
+    this.height = Math.round(height);
+    this.useTransform = useTransform;
+  }
+
+  draw() {
+    const el = document.createElement("div");
+    el.className = this.className;
+    this.applyStyle(el);
+    return el;
+  }
+
+  applyStyle(el) {
+    const win = el.ownerDocument?.defaultView || window;
+    win.requestAnimationFrame(() => {
+      el.style.height = `${this.height}px`;
+      if (this.useTransform) {
+        el.style.transform = `translate3d(${this.left}px, ${this.top}px, 0)`;
+        el.style.left = "0px";
+        el.style.top = "0px";
+      } else {
+        el.style.left = `${this.left}px`;
+        el.style.top = `${this.top}px`;
+        el.style.transform = "";
+      }
+    });
+  }
+
+  adjust(cursorEl) {
+    if (cursorEl) {
+      this.applyStyle(cursorEl);
+    }
+  }
+
+  update(el, oldMarker) {
+    if (oldMarker.className !== this.className || oldMarker.useTransform !== this.useTransform) {
+      return false;
+    }
+    this.applyStyle(el);
+    return true;
+  }
+
+  eq(other) {
+    return (
+      other != null &&
+      this.left === other.left &&
+      this.top === other.top &&
+      this.height === other.height &&
+      this.className === other.className &&
+      this.useTransform === other.useTransform
+    );
+  }
+
+  static forRange(view, className, range, useTransform = true) {
+    const coords = view.coordsAtPos(range.head, range.assoc || 1);
+    if (!coords) return null;
+    const offset = getScrollOffset(view);
+    return new CrispCursorMarker(
+      className,
+      coords.left - offset.left,
+      coords.top - offset.top,
+      coords.bottom - coords.top,
+      useTransform
+    );
+  }
+
+  static forTableCellRange(parentView, cellView, className, range, useTransform = true) {
+    const coords = cellView.coordsAtPos(range.head, range.assoc || 1);
+    if (!coords) return null;
+    const offset = getScrollOffset(parentView);
+    return new CrispCursorMarker(
+      className,
+      coords.left - offset.left,
+      coords.top - offset.top,
+      coords.bottom - coords.top,
+      useTransform
+    );
+  }
+}
+
+function getScrollOffset(view) {
+  if (!view || !view.scrollDOM) return { top: 0, left: 0 };
+  const rect = view.scrollDOM.getBoundingClientRect();
+  const left =
+    view.textDirection === 1 || !view.textDirection
+      ? rect.left
+      : rect.right - view.scrollDOM.clientWidth * (view.scaleX || 1);
+  return {
+    top: rect.top - view.scrollDOM.scrollTop * (view.scaleY || 1),
+    left: left - view.scrollDOM.scrollLeft * (view.scaleX || 1),
+  };
+}
+
+function getActiveTableCell(state) {
+  if (!state || typeof state.field !== "function") return null;
+  try {
+    const editor = state.field(obsidian.editorInfoField)?.editor;
+    return editor && editor.inTableCell ? editor.activeCM : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function debounceHelper(fn, delay, resetTimer = false) {
+  if (obsidian && typeof obsidian.debounce === "function") {
+    return obsidian.debounce(fn, delay, resetTimer);
+  }
+  let timer = null;
+  return function (...args) {
+    if (resetTimer && timer) clearTimeout(timer);
+    if (!timer || resetTimer) {
+      timer = setTimeout(() => {
+        timer = null;
+        fn.apply(this, args);
+      }, delay);
+    }
+  };
+}
+
+const debounceBlink = debounceHelper((dom) => {
+  if (!dom) return;
+  if (typeof dom.addClass === "function") {
+    dom.addClass("cm-blinkLayer");
+  } else if (dom.classList) {
+    dom.classList.add("cm-blinkLayer");
+  }
+}, 350, true);
+
 function hookCursorPlugin(view) {
   if (!view || !view.plugins) return null;
   return view.plugins.find((inst) => {
@@ -738,12 +870,31 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
     if (cursorElements) {
       cursorElements.forEach((cursorEl) => {
         cursorEl.style.transition = "";
+        cursorEl.style.transform = "";
       });
       patchedEditors.delete(editor);
     }
   };
 
   const unpatch = around(layer, {
+    update: (origUpdate) => function (update, dom) {
+      const result = origUpdate ? origUpdate.call(this, update, dom) : false;
+      if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
+        return result;
+      }
+      const cell = update && update.state ? getActiveTableCell(update.state) : null;
+      const isOverTableCell = cell && cell !== update.view && cell.hasFocus;
+      if (dom && dom.classList) {
+        dom.classList.toggle("cm-overTableCell", Boolean(isOverTableCell));
+      }
+      if (update && (update.docChanged || update.selectionSet) && (update.view.hasFocus || isOverTableCell)) {
+        if (dom && dom.classList) {
+          dom.classList.remove("cm-blinkLayer");
+          debounceBlink(dom);
+        }
+      }
+      return result;
+    },
     markers: (origMarkers) => function (view) {
       const result = origMarkers.call(this, view);
       if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
@@ -751,10 +902,8 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
         return result;
       }
 
-      const adjustableMarkers = Array.isArray(result)
-        ? result.filter((marker) => marker && typeof marker.adjust === "function")
-        : [];
-      if (adjustableMarkers.length === 0) {
+      const rawMarkers = Array.isArray(result) ? result : [];
+      if (rawMarkers.length === 0) {
         cleanupEditor(view.dom);
         return result;
       }
@@ -766,21 +915,22 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
       view.dom.style.setProperty("--crisp-focus-cursor-speed", `${speed}ms`);
       view.dom.style.setProperty("--crisp-focus-blink-rate", `${blinkRate}ms`);
       view.dom.style.setProperty("--crisp-focus-blink-count", `${blinkCount}`);
+      view.dom.classList.add("crisp-focus-active");
+      view.dom.classList.toggle("crisp-focus-no-blink", blinkCount === 0);
 
       if (!patchedEditors.has(view.dom)) {
         patchedEditors.set(view.dom, new Set());
       }
 
-      adjustableMarkers.forEach((marker) => {
+      rawMarkers.forEach((marker) => {
+        if (!marker) return;
         const origAdjust = marker.adjust;
         marker.adjust = function (cursorEl) {
           if (cursorEl) {
-            view.dom.classList.add("crisp-focus-active");
-            view.dom.classList.toggle("crisp-focus-no-blink", blinkCount === 0);
-            cursorEl.style.transition = `transform ${speed}ms cubic-bezier(0.16, 1, 0.3, 1), height 80ms ease`;
+            cursorEl.style.transition = `transform ${speed}ms cubic-bezier(0.2, 0, 0, 1), height 60ms ease`;
             patchedEditors.get(view.dom).add(cursorEl);
           }
-          return origAdjust.call(this, cursorEl);
+          return origAdjust ? origAdjust.call(this, cursorEl) : undefined;
         };
       });
       return result;

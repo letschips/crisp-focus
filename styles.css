@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.2)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.3)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -31,16 +31,17 @@
 }
 
 /* --------------------------------------------------------------------------
- * 1. Animated Smooth Cursor (CM6 Native Layer Smooth Motion - Identical to Animated Cursor)
+ * 1. Animated Smooth Cursor (GPU-Accelerated Subpixel Motion Engine)
  * -------------------------------------------------------------------------- */
-.cm-editor.crisp-focus-active .cm-cursorLayer .cm-cursor {
+.cm-editor.crisp-focus-active .cm-cursor {
   transition-property: transform, translate, top, left !important;
   transition-duration: var(--crisp-focus-cursor-speed, 80ms) !important;
-  transition-timing-function: var(--crisp-focus-cursor-easing, ease) !important;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1) !important;
   border-left-width: 2px !important;
+  border-left-style: solid !important;
   border-left-color: var(--interactive-accent, #705df2) !important;
-  box-shadow: 0 0 6px color-mix(in srgb, var(--interactive-accent, #705df2) 50%, transparent);
   will-change: transform, translate, left, top;
+  box-sizing: border-box;
 }
 
 /* Caret Idle Blink (Exact keyframes and formula from animated-cursor) */
@@ -53,12 +54,19 @@
   }
 }
 
-.cm-editor.crisp-focus-active > .cm-scroller > .cm-cursorLayer.cm-blinkLayer {
+.cm-editor.crisp-focus-active.cm-focused > .cm-scroller > .cm-cursorLayer.cm-blinkLayer,
+.cm-editor.crisp-focus-active > .cm-scroller > .cm-cursorLayer.cm-overTableCell.cm-blinkLayer {
   animation-name: crisp-focus-cm-cursor-blink !important;
   animation-duration: calc(var(--crisp-focus-blink-rate, 1000ms) / 2) !important;
-  animation-timing-function: var(--crisp-focus-blink-easing, ease-in-out) !important;
+  animation-timing-function: ease-in-out !important;
   animation-direction: alternate-reverse !important;
   animation-iteration-count: calc(var(--crisp-focus-blink-count, 10) * 2) !important;
+}
+
+/* When typing or moving, cursor stays 100% solid & crisp (no blinking mid-flight) */
+.cm-editor.crisp-focus-active > .cm-scroller > .cm-cursorLayer:not(.cm-blinkLayer) {
+  animation: none !important;
+  opacity: 1 !important;
 }
 
 /* When blink count is 0, stop blinking completely */
@@ -67,8 +75,12 @@
   opacity: 1 !important;
 }
 
-.cm-editor.crisp-focus-active > .cm-scroller > .cm-cursorLayer:not(.cm-blinkLayer) {
-  animation: none !important;
+.cm-cursorLayer.cm-overTableCell .cm-cursor {
+  display: block !important;
+}
+
+.table-cell-wrapper .cm-cursorLayer {
+  display: none !important;
 }
 
 /* --------------------------------------------------------------------------
