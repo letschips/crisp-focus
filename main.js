@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.3)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.4)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -718,10 +718,10 @@ class CrispFocusAudioEngine {
 class CrispCursorMarker {
   constructor(className, left, top, height, useTransform = true) {
     this.className = className;
+    this.useTransform = useTransform;
     this.left = Math.round(left);
     this.top = Math.round(top);
     this.height = Math.round(height);
-    this.useTransform = useTransform;
   }
 
   draw() {
@@ -732,17 +732,22 @@ class CrispCursorMarker {
   }
 
   applyStyle(el) {
-    const win = el.ownerDocument?.defaultView || window;
+    const win = el.win || el.ownerDocument?.defaultView || window;
     win.requestAnimationFrame(() => {
-      el.style.height = `${this.height}px`;
+      const styles = { height: `${this.height}px` };
       if (this.useTransform) {
-        el.style.transform = `translate3d(${this.left}px, ${this.top}px, 0)`;
-        el.style.left = "0px";
-        el.style.top = "0px";
+        styles.translate = `${this.left}px ${this.top}px`;
       } else {
-        el.style.left = `${this.left}px`;
-        el.style.top = `${this.top}px`;
-        el.style.transform = "";
+        styles.left = `${this.left}px`;
+        styles.top = `${this.top}px`;
+      }
+      if (typeof el.setCssStyles === "function") {
+        el.setCssStyles(styles);
+      } else {
+        if (styles.translate !== undefined) el.style.translate = styles.translate;
+        if (styles.left !== undefined) el.style.left = styles.left;
+        if (styles.top !== undefined) el.style.top = styles.top;
+        if (styles.height !== undefined) el.style.height = styles.height;
       }
     });
   }
@@ -757,7 +762,11 @@ class CrispCursorMarker {
     if (oldMarker.className !== this.className || oldMarker.useTransform !== this.useTransform) {
       return false;
     }
-    this.applyStyle(el);
+    this.requestAdjust =
+      oldMarker.requestAdjust ||
+      this.requestAdjust ||
+      debounceHelper((marker, target) => marker.applyStyle(target), 10);
+    this.requestAdjust(this, el);
     return true;
   }
 
@@ -870,20 +879,21 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
     if (cursorElements) {
       cursorElements.forEach((cursorEl) => {
         cursorEl.style.transition = "";
-        cursorEl.style.transform = "";
+        cursorEl.style.translate = "";
       });
       patchedEditors.delete(editor);
     }
   };
 
   const unpatch = around(layer, {
-    update: (origUpdate) => function (update, dom) {
-      const result = origUpdate ? origUpdate.call(this, update, dom) : false;
+    mount: () => function () {},
+    update: () => function (update, dom) {
       if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
-        return result;
+        return false;
       }
       const cell = update && update.state ? getActiveTableCell(update.state) : null;
-      const isOverTableCell = cell && cell !== update.view && cell.hasFocus;
+      if (cell === update.view) return false;
+      const isOverTableCell = !update.view.hasFocus && (cell?.hasFocus ?? false);
       if (dom && dom.classList) {
         dom.classList.toggle("cm-overTableCell", Boolean(isOverTableCell));
       }
@@ -892,48 +902,86 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
           dom.classList.remove("cm-blinkLayer");
           debounceBlink(dom);
         }
+        return true;
       }
-      return result;
+      return false;
     },
     markers: (origMarkers) => function (view) {
-      const result = origMarkers.call(this, view);
+      const origResult = origMarkers ? origMarkers.call(this, view) : [];
       if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
-        cleanupEditor(view.dom);
-        return result;
-      }
-
-      const rawMarkers = Array.isArray(result) ? result : [];
-      if (rawMarkers.length === 0) {
-        cleanupEditor(view.dom);
-        return result;
+        cleanupEditor(view && view.dom);
+        return origResult;
       }
 
       const speed = plugin.settings.cursorSpeed ?? 80;
       const blinkRate = plugin.settings.blinkRate ?? 1000;
       const blinkCount = plugin.settings.blinkCount ?? 10;
 
-      view.dom.style.setProperty("--crisp-focus-cursor-speed", `${speed}ms`);
-      view.dom.style.setProperty("--crisp-focus-blink-rate", `${blinkRate}ms`);
-      view.dom.style.setProperty("--crisp-focus-blink-count", `${blinkCount}`);
-      view.dom.classList.add("crisp-focus-active");
-      view.dom.classList.toggle("crisp-focus-no-blink", blinkCount === 0);
+      // Real CodeMirror 6 EditorView with state & selection
+      let state = view ? view.state : null;
+      if (state && state.selection && Array.isArray(state.selection.ranges)) {
+        const cell = !view.hasFocus ? getActiveTableCell(state) : null;
+        if (cell) state = cell.state;
+        if (view === cell) return [];
 
-      if (!patchedEditors.has(view.dom)) {
-        patchedEditors.set(view.dom, new Set());
+        if (state.selection.ranges.length === 0) {
+          cleanupEditor(view.dom);
+          return [];
+        }
+
+        if (view.dom) {
+          view.dom.style.setProperty("--crisp-focus-cursor-speed", `${speed}ms`);
+          view.dom.style.setProperty("--crisp-focus-blink-rate", `${blinkRate}ms`);
+          view.dom.style.setProperty("--crisp-focus-blink-count", `${blinkCount}`);
+          view.dom.classList.add("crisp-focus-active");
+          view.dom.classList.toggle("crisp-focus-no-blink", blinkCount === 0);
+          if (!patchedEditors.has(view.dom)) {
+            patchedEditors.set(view.dom, new Set());
+          }
+        }
+
+        const markers = [];
+        for (const range of state.selection.ranges) {
+          const isPrimary = range === state.selection.main;
+          const cls = `cm-cursor ${isPrimary ? "cm-cursor-primary" : "cm-cursor-secondary"}`;
+          const marker = cell
+            ? CrispCursorMarker.forTableCellRange(view, cell, cls, range, true)
+            : CrispCursorMarker.forRange(view, cls, range, true);
+          if (marker) markers.push(marker);
+        }
+        return markers.length > 0 ? markers : origResult;
+      }
+
+      // Fallback for mocks / synthetic marker layers
+      const rawMarkers = Array.isArray(origResult) ? origResult : [];
+      if (rawMarkers.length === 0) {
+        cleanupEditor(view && view.dom);
+        return origResult;
+      }
+
+      if (view && view.dom) {
+        view.dom.style.setProperty("--crisp-focus-cursor-speed", `${speed}ms`);
+        view.dom.style.setProperty("--crisp-focus-blink-rate", `${blinkRate}ms`);
+        view.dom.style.setProperty("--crisp-focus-blink-count", `${blinkCount}`);
+        if (!patchedEditors.has(view.dom)) {
+          patchedEditors.set(view.dom, new Set());
+        }
       }
 
       rawMarkers.forEach((marker) => {
         if (!marker) return;
         const origAdjust = marker.adjust;
         marker.adjust = function (cursorEl) {
-          if (cursorEl) {
-            cursorEl.style.transition = `transform ${speed}ms cubic-bezier(0.2, 0, 0, 1), height 60ms ease`;
-            patchedEditors.get(view.dom).add(cursorEl);
+          if (cursorEl && view && view.dom) {
+            view.dom.classList.add("crisp-focus-active");
+            view.dom.classList.toggle("crisp-focus-no-blink", blinkCount === 0);
+            cursorEl.style.transition = `translate ${speed}ms ease, top ${speed}ms ease, left ${speed}ms ease, height 60ms ease`;
+            patchedEditors.get(view.dom)?.add(cursorEl);
           }
           return origAdjust ? origAdjust.call(this, cursorEl) : undefined;
         };
       });
-      return result;
+      return rawMarkers;
     }
   });
 

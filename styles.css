@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.3)
+   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.4)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -34,14 +34,10 @@
  * 1. Animated Smooth Cursor (GPU-Accelerated Subpixel Motion Engine)
  * -------------------------------------------------------------------------- */
 .cm-editor.crisp-focus-active .cm-cursor {
-  transition-property: transform, translate, top, left !important;
+  transition-property: translate, top, left !important;
   transition-duration: var(--crisp-focus-cursor-speed, 80ms) !important;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1) !important;
+  transition-timing-function: var(--crisp-focus-cursor-easing, ease) !important;
   border-left-width: 2px !important;
-  border-left-style: solid !important;
-  border-left-color: var(--interactive-accent, #705df2) !important;
-  will-change: transform, translate, left, top;
-  box-sizing: border-box;
 }
 
 /* Caret Idle Blink (Exact keyframes and formula from animated-cursor) */

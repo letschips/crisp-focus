@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.4
+
+- 深度对齐 Animated Cursor 物理动效架构：完整接管 CodeMirror 6 光标图层 Markers，采用 `requestAnimationFrame` + `translate` 复合层坐标插值与 10ms 防抖更新，彻底消除掉帧与粘滞，手感达到顶级丝滑。
+
 ## 1.3.3
 
 - 光标引擎重构升级：引入 GPU 硬件加速 `translate3d` 亚像素平滑插值算法与 350ms 打字常亮消抖，优化 Markdown 表格坐标穿透，带来极致跟手且锐利的物理弹簧手感。
