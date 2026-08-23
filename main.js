@@ -1173,6 +1173,7 @@ function createTypewriterExtension(plugin) {
       if (view.scrollDOM) {
         view.scrollDOM.addEventListener("wheel", this.wheelHandler, { passive: true });
         view.scrollDOM.addEventListener("touchmove", this.wheelHandler, { passive: true });
+        view.scrollDOM.addEventListener("scroll", this.wheelHandler, { passive: true });
       }
       this.applyEditorStyles();
     }
@@ -1181,20 +1182,28 @@ function createTypewriterExtension(plugin) {
       if (!plugin.settings?.focusModeEnabled || !plugin.settings?.typewriterScrollEnabled) {
         return;
       }
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        if (update.view?.hasFocus) {
-          plugin.typewriterEngine?.onUserActivity();
-        }
-        const win = update.view?.dom?.ownerDocument?.defaultView || plugin.mainWindow || window;
-        if (this.rafId && typeof win.cancelAnimationFrame === "function") {
-          win.cancelAnimationFrame(this.rafId);
-        }
-        if (typeof win.requestAnimationFrame === "function") {
-          this.rafId = win.requestAnimationFrame(() => {
-            this.rafId = null;
-            plugin.typewriterEngine?.requestScroll(update.view, update.docChanged ? "doc-change" : "selection", update.docChanged);
-          });
-        }
+      // Only typewriter scroll on actual content typing or cursor movement
+      // DO NOT auto-scroll on pure viewport scrolling (mouse wheel / trackpad / scrollbar)
+      if (!update.docChanged && !update.selectionSet) {
+        return;
+      }
+
+      // Re-engage typewriter scrolling on typing or explicit cursor repositioning
+      plugin.typewriterEngine?.onUserActivity();
+
+      const win = update.view?.dom?.ownerDocument?.defaultView || plugin.mainWindow || window;
+      if (this.rafId && typeof win.cancelAnimationFrame === "function") {
+        win.cancelAnimationFrame(this.rafId);
+      }
+      if (typeof win.requestAnimationFrame === "function") {
+        this.rafId = win.requestAnimationFrame(() => {
+          this.rafId = null;
+          plugin.typewriterEngine?.requestScroll(
+            update.view,
+            update.docChanged ? "doc-change" : "selection",
+            update.docChanged
+          );
+        });
       }
     }
 
@@ -1232,6 +1241,7 @@ function createTypewriterExtension(plugin) {
       if (this.view && this.view.scrollDOM && this.wheelHandler) {
         this.view.scrollDOM.removeEventListener("wheel", this.wheelHandler);
         this.view.scrollDOM.removeEventListener("touchmove", this.wheelHandler);
+        this.view.scrollDOM.removeEventListener("scroll", this.wheelHandler);
       }
       if (this.view && this.view.dom) {
         if (this.view.dom.classList) {
