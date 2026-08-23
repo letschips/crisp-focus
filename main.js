@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.4)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1001,12 +1001,228 @@ function ensureCursorLayerPatched(editorView, plugin, patchUninstallers) {
 }
 
 // --------------------------------------------------------------------------
-// 3. Settings Schema & Apple Spring Accordion Settings Tab
+// 3. Typewriter Scrolling Engine (CM6 ViewPlugin & Active Viewport Maintainer)
+// --------------------------------------------------------------------------
+class CrispTypewriterEngine {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.userScrolling = false;
+    this.userScrollTimeout = null;
+  }
+
+  calculateScrollDelta(view) {
+    if (!view || !view.scrollDOM || !view.state || !view.state.selection) return 0;
+    const settings = this.plugin?.settings;
+    if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return 0;
+
+    const mainSelection = view.state.selection.main;
+    if (!mainSelection) return 0;
+
+    const pos = mainSelection.head;
+    const coords = typeof view.coordsAtPos === "function" ? view.coordsAtPos(pos) : null;
+    if (!coords) return 0;
+
+    const scrollDOM = view.scrollDOM;
+    const editorRect = typeof scrollDOM.getBoundingClientRect === "function"
+      ? scrollDOM.getBoundingClientRect()
+      : null;
+    if (!editorRect || editorRect.height <= 0) return 0;
+
+    const currentY = coords.top - editorRect.top;
+    const targetRatio = (settings.typewriterScrollOffset ?? 42) / 100;
+    const targetY = editorRect.height * targetRatio;
+
+    const mode = settings.typewriterScrollMode || "soft";
+    if (mode === "soft") {
+      const toleranceRatio = (settings.typewriterScrollTolerance ?? 10) / 100;
+      const topBand = targetY - editorRect.height * toleranceRatio;
+      const bottomBand = targetY + editorRect.height * toleranceRatio;
+
+      if (currentY >= topBand && currentY <= bottomBand) {
+        return 0;
+      }
+      return currentY - targetY;
+    } else {
+      const delta = currentY - targetY;
+      return Math.abs(delta) > 1 ? delta : 0;
+    }
+  }
+
+  requestScroll(view, reason = "update") {
+    if (!view || !view.scrollDOM) return;
+    if (this.userScrolling) return;
+    if (this.plugin?.isComposing) return;
+    const settings = this.plugin?.settings;
+    if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return;
+
+    const delta = this.calculateScrollDelta(view);
+    if (Math.abs(delta) < 1) return;
+
+    const scrollDOM = view.scrollDOM;
+    const currentScrollTop = scrollDOM.scrollTop || 0;
+    const scrollHeight = scrollDOM.scrollHeight || 0;
+    const clientHeight = scrollDOM.clientHeight || 0;
+    const maxScroll = Math.max(0, scrollHeight - clientHeight);
+    const newTargetScrollTop = Math.max(0, Math.min(maxScroll, currentScrollTop + delta));
+
+    if (Math.abs(newTargetScrollTop - currentScrollTop) < 1) return;
+
+    const smooth = settings.typewriterScrollSmooth;
+    if (!smooth) {
+      scrollDOM.scrollTop = newTargetScrollTop;
+      return;
+    }
+
+    if (typeof scrollDOM.scrollTo === "function") {
+      try {
+        scrollDOM.scrollTo({
+          top: newTargetScrollTop,
+          behavior: "smooth",
+        });
+        return;
+      } catch (e) {
+        // Fallback below
+      }
+    }
+    scrollDOM.scrollTop = newTargetScrollTop;
+  }
+
+  onUserScroll() {
+    this.userScrolling = true;
+    if (this.userScrollTimeout) {
+      const win = this.plugin?.mainWindow || (typeof window !== "undefined" ? window : null);
+      const clearTimer = win?.clearTimeout || clearTimeout;
+      clearTimer(this.userScrollTimeout);
+    }
+    const win = this.plugin?.mainWindow || (typeof window !== "undefined" ? window : null);
+    const setTimer = win?.setTimeout || setTimeout;
+    this.userScrollTimeout = setTimer(() => {
+      this.userScrolling = false;
+      this.userScrollTimeout = null;
+    }, 1200);
+  }
+
+  onUserActivity() {
+    this.userScrolling = false;
+    if (this.userScrollTimeout) {
+      const win = this.plugin?.mainWindow || (typeof window !== "undefined" ? window : null);
+      const clearTimer = win?.clearTimeout || clearTimeout;
+      clearTimer(this.userScrollTimeout);
+      this.userScrollTimeout = null;
+    }
+  }
+
+  destroy() {
+    if (this.userScrollTimeout) {
+      const win = this.plugin?.mainWindow || (typeof window !== "undefined" ? window : null);
+      const clearTimer = win?.clearTimeout || clearTimeout;
+      clearTimer(this.userScrollTimeout);
+      this.userScrollTimeout = null;
+    }
+    this.userScrolling = false;
+  }
+}
+
+function createTypewriterExtension(plugin) {
+  let cmView = null;
+  try {
+    cmView = require("@codemirror/view");
+  } catch (e) {
+    return null;
+  }
+  if (!cmView || typeof cmView.ViewPlugin?.fromClass !== "function") {
+    return null;
+  }
+
+  class CrispTypewriterViewPlugin {
+    constructor(view) {
+      this.view = view;
+      this.rafId = null;
+      this.wheelHandler = () => {
+        plugin.typewriterEngine?.onUserScroll();
+      };
+      if (view.scrollDOM) {
+        view.scrollDOM.addEventListener("wheel", this.wheelHandler, { passive: true });
+        view.scrollDOM.addEventListener("touchmove", this.wheelHandler, { passive: true });
+      }
+      this.applyEditorStyles();
+    }
+
+    update(update) {
+      if (!plugin.settings?.focusModeEnabled || !plugin.settings?.typewriterScrollEnabled) {
+        return;
+      }
+      if (update.docChanged || update.selectionSet || update.viewportChanged) {
+        if (update.view?.hasFocus) {
+          plugin.typewriterEngine?.onUserActivity();
+        }
+        const win = update.view?.dom?.ownerDocument?.defaultView || plugin.mainWindow || window;
+        if (this.rafId && typeof win.cancelAnimationFrame === "function") {
+          win.cancelAnimationFrame(this.rafId);
+        }
+        if (typeof win.requestAnimationFrame === "function") {
+          this.rafId = win.requestAnimationFrame(() => {
+            this.rafId = null;
+            plugin.typewriterEngine?.requestScroll(update.view, "update");
+          });
+        }
+      }
+    }
+
+    applyEditorStyles() {
+      if (!this.view || !this.view.dom) return;
+      const enabled = Boolean(plugin.settings?.focusModeEnabled && plugin.settings?.typewriterScrollEnabled);
+      const padEnabled = Boolean(enabled && plugin.settings?.typewriterScrollBottomPadding);
+      const offsetRatio = (plugin.settings?.typewriterScrollOffset ?? 42) / 100;
+      const bottomRatio = Math.max(0.2, Math.round((1 - offsetRatio) * 100) / 100);
+
+      if (this.view.dom.classList) {
+        this.view.dom.classList.toggle("crisp-focus-typewriter-active", enabled);
+        this.view.dom.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
+      }
+      if (this.view.dom.style) {
+        if (enabled) {
+          this.view.dom.style.setProperty("--crisp-focus-typewriter-bottom-ratio", String(bottomRatio));
+          this.view.dom.style.setProperty("--crisp-focus-typewriter-offset-ratio", String(offsetRatio));
+        } else {
+          this.view.dom.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+          this.view.dom.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
+        }
+      }
+    }
+
+    destroy() {
+      const win = this.view?.dom?.ownerDocument?.defaultView || plugin.mainWindow || window;
+      if (this.rafId && typeof win.cancelAnimationFrame === "function") {
+        win.cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+      if (this.view && this.view.scrollDOM && this.wheelHandler) {
+        this.view.scrollDOM.removeEventListener("wheel", this.wheelHandler);
+        this.view.scrollDOM.removeEventListener("touchmove", this.wheelHandler);
+      }
+      if (this.view && this.view.dom) {
+        if (this.view.dom.classList) {
+          this.view.dom.classList.remove("crisp-focus-typewriter-active", "crisp-focus-typewriter-padding");
+        }
+        if (this.view.dom.style) {
+          this.view.dom.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+          this.view.dom.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
+        }
+      }
+    }
+  }
+
+  return cmView.ViewPlugin.fromClass(CrispTypewriterViewPlugin);
+}
+
+// --------------------------------------------------------------------------
+// 4. Settings Schema & Apple Spring Accordion Settings Tab
 // --------------------------------------------------------------------------
 const FOCUS_SCENES = Object.freeze({
   "silent-writing": Object.freeze({
     name: "静默写作",
-    description: "只保留平滑光标，不播放任何声音。",
+    description: "只保留平滑光标与打字机定焦，不播放任何声音。",
     settings: Object.freeze({
       ambientSound: "off",
       ambientVolume: 0.45,
@@ -1019,11 +1235,17 @@ const FOCUS_SCENES = Object.freeze({
       typewriterAudioEnabled: false,
       typewriterBellEnabled: false,
       typewriterVolume: 0.35,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "soft",
+      typewriterScrollOffset: 42,
+      typewriterScrollTolerance: 10,
+      typewriterScrollBottomPadding: true,
+      typewriterScrollSmooth: true,
     }),
   }),
   "vintage-typewriter": Object.freeze({
     name: "复古打字机",
-    description: "敏捷光标与清晰的复古打字机反馈。",
+    description: "敏捷光标、严格定焦与清晰的复古打字机反馈。",
     settings: Object.freeze({
       ambientSound: "off",
       ambientVolume: 0.45,
@@ -1036,11 +1258,17 @@ const FOCUS_SCENES = Object.freeze({
       typewriterAudioEnabled: true,
       typewriterBellEnabled: true,
       typewriterVolume: 0.55,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "strict",
+      typewriterScrollOffset: 42,
+      typewriterScrollTolerance: 10,
+      typewriterScrollBottomPadding: true,
+      typewriterScrollSmooth: true,
     }),
   }),
   "rainy-writing": Object.freeze({
     name: "雨天写作",
-    description: "轻柔雨滴按键音与本地雨声环境。",
+    description: "轻柔雨滴按键音、平滑定焦与本地雨声环境。",
     settings: Object.freeze({
       ambientSound: "rain",
       ambientVolume: 0.45,
@@ -1053,11 +1281,17 @@ const FOCUS_SCENES = Object.freeze({
       typewriterAudioEnabled: true,
       typewriterBellEnabled: false,
       typewriterVolume: 0.35,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "soft",
+      typewriterScrollOffset: 42,
+      typewriterScrollTolerance: 10,
+      typewriterScrollBottomPadding: true,
+      typewriterScrollSmooth: true,
     }),
   }),
   "ocean-zen": Object.freeze({
     name: "海边禅写",
-    description: "舒缓光标、木鱼反馈与低音量海浪。",
+    description: "舒缓光标、木鱼反馈、平滑定焦与低音量海浪。",
     settings: Object.freeze({
       ambientSound: "ocean",
       ambientVolume: 0.4,
@@ -1070,6 +1304,12 @@ const FOCUS_SCENES = Object.freeze({
       typewriterAudioEnabled: true,
       typewriterBellEnabled: true,
       typewriterVolume: 0.4,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "soft",
+      typewriterScrollOffset: 42,
+      typewriterScrollTolerance: 10,
+      typewriterScrollBottomPadding: true,
+      typewriterScrollSmooth: true,
     }),
   }),
 });
@@ -1215,6 +1455,12 @@ const DEFAULT_SETTINGS = {
   cursorSpeed: 80,
   blinkRate: 1000,
   blinkCount: 10,
+  typewriterScrollEnabled: true,
+  typewriterScrollMode: "soft", // "soft" | "strict"
+  typewriterScrollOffset: 42, // target Y position % (20 - 80, default 42)
+  typewriterScrollTolerance: 10, // soft mode margin % (5 - 25, default 10)
+  typewriterScrollBottomPadding: true, // inject viewport bottom padding
+  typewriterScrollSmooth: true, // smooth scroll transition
   typewriterAudioEnabled: false,
   soundTheme: "typewriter", // typewriter, mechanical, raindrop, retro8bit, woodenFish
   typewriterVolume: 0.7,
@@ -1554,7 +1800,108 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    // Card 2: Multi-Theme Audio Engine
+    // Card 2: Typewriter Scrolling Engine
+    const typewriterCard = createGroup(
+      "打字机定焦",
+      "书写时光标与当前输入行始终保持在黄金视线高度。",
+      true
+    );
+
+    new obsidian.Setting(typewriterCard)
+      .setName("启用打字机定焦")
+      .setDesc("光标移动或文字输入时，视口自动跟随保持舒适高度。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.typewriterScrollEnabled)
+          .onChange(async (val) => {
+            await this.plugin.setTypewriterScrollEnabled(val);
+            this.display();
+          })
+      );
+
+    new obsidian.Setting(typewriterCard)
+      .setName("滚动模式")
+      .setDesc("平滑区间模式在舒适带内自由移动，出界时平滑推回；严格定焦模式每行都精确锁定在黄金高度。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("soft", "🌊 平滑区间 (Soft Mode · 推荐)")
+          .addOption("strict", "🎯 严格定焦 (Strict Mode · 经典打字机)")
+          .setValue(this.plugin.settings.typewriterScrollMode || "soft")
+          .onChange(async (val) => {
+            await this.plugin.setTypewriterScrollMode(val);
+            this.display();
+          })
+      );
+
+    new obsidian.Setting(typewriterCard)
+      .setName("黄金视线高度")
+      .setDesc(`当前光标定焦位置：屏幕高度的 ${this.plugin.settings.typewriterScrollOffset ?? 42}%。`)
+      .addSlider((slider) =>
+        slider
+          .setLimits(20, 80, 1)
+          .setValue(this.plugin.settings.typewriterScrollOffset ?? 42)
+          .setDynamicTooltip()
+          .onChange(async (val) => {
+            await this.plugin.setTypewriterScrollOffset(val);
+          })
+      )
+      .addExtraButton((btn) =>
+        btn
+          .setIcon("reset")
+          .setTooltip("恢复默认高度（42%）")
+          .onClick(async () => {
+            await this.plugin.setTypewriterScrollOffset(42);
+            this.display();
+          })
+      );
+
+    if ((this.plugin.settings.typewriterScrollMode || "soft") === "soft") {
+      new obsidian.Setting(typewriterCard)
+        .setName("平滑区间容差")
+        .setDesc(`光标自由活动范围：±${this.plugin.settings.typewriterScrollTolerance ?? 10}%（即 ${(this.plugin.settings.typewriterScrollOffset ?? 42) - (this.plugin.settings.typewriterScrollTolerance ?? 10)}% ~ ${(this.plugin.settings.typewriterScrollOffset ?? 42) + (this.plugin.settings.typewriterScrollTolerance ?? 10)}%）。`)
+        .addSlider((slider) =>
+          slider
+            .setLimits(5, 25, 1)
+            .setValue(this.plugin.settings.typewriterScrollTolerance ?? 10)
+            .setDynamicTooltip()
+            .onChange(async (val) => {
+              await this.plugin.setTypewriterScrollTolerance(val);
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("reset")
+            .setTooltip("恢复默认容差（±10%）")
+            .onClick(async () => {
+              await this.plugin.setTypewriterScrollTolerance(10);
+              this.display();
+            })
+        );
+    }
+
+    new obsidian.Setting(typewriterCard)
+      .setName("底部留白扩展")
+      .setDesc("为编辑器底部注入视口留白，让写到文章末尾时也能舒适定焦，无需在屏幕最底部打字。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.typewriterScrollBottomPadding)
+          .onChange(async (val) => {
+            await this.plugin.setTypewriterScrollBottomPadding(val);
+          })
+      );
+
+    new obsidian.Setting(typewriterCard)
+      .setName("平滑缓动滚动")
+      .setDesc("视口调整时使用柔和平滑的滚动过渡动画。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.typewriterScrollSmooth)
+          .onChange(async (val) => {
+            await this.plugin.setTypewriterScrollSmooth(val);
+          })
+      );
+
+    // Card 3: Multi-Theme Audio Engine
     const audioCard = createGroup(
       "声音反馈",
       "选择有触感的按键音主题，并可启用回车提示音。",
@@ -1763,6 +2110,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.detachWindow(windowObj);
     }));
 
+    // Initialize Typewriter Scrolling Engine
+    this.typewriterEngine = new CrispTypewriterEngine(this);
+    const typewriterExt = createTypewriterExtension(this);
+    if (typewriterExt && typeof this.registerEditorExtension === "function") {
+      this.registerEditorExtension(typewriterExt);
+    }
+
     // Patch CM6 native cursor layer
     this.cursorPatchUninstallers = new Map();
     const tryPatchCursor = () => {
@@ -1774,6 +2128,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
         this,
         this.cursorPatchUninstallers
       );
+      this.updateTypewriterStyles();
     };
 
     this.registerEvent(this.app.workspace.on("active-leaf-change", tryPatchCursor));
@@ -1800,6 +2155,25 @@ class CrispFocusPlugin extends obsidian.Plugin {
       callback: async () => {
         await this.setAnimatedCursorEnabled(!this.settings.animatedCursorEnabled);
         new obsidian.Notice(`Crisp Focus cursor ${this.settings.animatedCursorEnabled ? "enabled" : "disabled"}`);
+      }
+    });
+
+    this.addCommand({
+      id: "toggle-typewriter-scroll",
+      name: "Toggle typewriter scrolling",
+      callback: async () => {
+        await this.setTypewriterScrollEnabled(!this.settings.typewriterScrollEnabled);
+        new obsidian.Notice(`Crisp Focus 打字机定焦已${this.settings.typewriterScrollEnabled ? "开启" : "关闭"}`);
+      }
+    });
+
+    this.addCommand({
+      id: "toggle-typewriter-mode",
+      name: "Toggle typewriter mode (Soft / Strict)",
+      callback: async () => {
+        const newMode = this.settings.typewriterScrollMode === "soft" ? "strict" : "soft";
+        await this.setTypewriterScrollMode(newMode);
+        new obsidian.Notice(`Crisp Focus 已切换为${newMode === "soft" ? "平滑区间模式" : "严格定焦模式"}`);
       }
     });
 
@@ -1869,6 +2243,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.cursorPatchUninstallers.clear();
     }
     this.clearCursorStyles();
+    if (this.typewriterEngine) {
+      this.typewriterEngine.destroy();
+    }
+    this.clearTypewriterStyles();
     if (this.windowBindings) {
       Array.from(this.windowBindings.keys()).forEach((windowObj) => {
         this.detachWindow(windowObj);
@@ -2029,15 +2407,31 @@ class CrispFocusPlugin extends obsidian.Plugin {
     };
     const compositionStartHandler = () => {
       state.isComposing = true;
+      this.isComposing = true;
     };
     const compositionEndHandler = () => {
       state.isComposing = false;
+      this.isComposing = false;
       if (this.settings.focusModeEnabled && this.settings.typewriterAudioEnabled) {
         this.audio.playSpaceKey();
+      }
+      if (this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled) {
+        const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+        if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+          const win = windowObj || window;
+          if (typeof win.requestAnimationFrame === "function") {
+            win.requestAnimationFrame(() => {
+              this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "ime-commit");
+            });
+          }
+        }
       }
     };
     const keydownHandler = (evt) => {
       gestureHandler();
+      if (this.typewriterEngine) {
+        this.typewriterEngine.onUserActivity();
+      }
       if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
       if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
 
@@ -2072,6 +2466,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     const beforeInputHandler = (evt) => {
       gestureHandler();
+      if (this.typewriterEngine) {
+        this.typewriterEngine.onUserActivity();
+      }
       if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
       // iOS 屏幕键盘：英文走 insertText，中文走组合输入 insertCompositionText。
       if (evt.inputType !== "insertText" && evt.inputType !== "insertCompositionText") return;
@@ -2123,15 +2520,125 @@ class CrispFocusPlugin extends obsidian.Plugin {
     }
   }
 
+  async setTypewriterScrollEnabled(enabled) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollEnabled = enabled;
+    await this.saveSettings();
+    this.updateTypewriterStyles();
+    if (enabled) {
+      const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+      if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+        this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "toggle");
+      }
+    }
+  }
+
+  async setTypewriterScrollMode(mode) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollMode = mode;
+    await this.saveSettings();
+    const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+    if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+      this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "mode-change");
+    }
+  }
+
+  async setTypewriterScrollOffset(offset) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollOffset = Math.max(20, Math.min(80, Math.round(Number(offset) || 42)));
+    await this.saveSettings();
+    this.updateTypewriterStyles();
+    const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+    if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+      this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "offset-change");
+    }
+  }
+
+  async setTypewriterScrollTolerance(tolerance) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollTolerance = Math.max(5, Math.min(25, Math.round(Number(tolerance) || 10)));
+    await this.saveSettings();
+    const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+    if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+      this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "tolerance-change");
+    }
+  }
+
+  async setTypewriterScrollBottomPadding(enabled) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollBottomPadding = enabled;
+    await this.saveSettings();
+    this.updateTypewriterStyles();
+  }
+
+  async setTypewriterScrollSmooth(smooth) {
+    this.markSceneCustom();
+    this.settings.typewriterScrollSmooth = smooth;
+    await this.saveSettings();
+  }
+
+  updateTypewriterStyles() {
+    const windowObjects = this.windowBindings
+      ? Array.from(this.windowBindings.keys())
+      : [this.mainWindow];
+    const enabled = Boolean(this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled);
+    const padEnabled = Boolean(enabled && this.settings.typewriterScrollBottomPadding);
+    const offsetRatio = (this.settings.typewriterScrollOffset ?? 42) / 100;
+    const bottomRatio = Math.max(0.2, Math.round((1 - offsetRatio) * 100) / 100);
+
+    windowObjects.forEach((windowObj) => {
+      if (!windowObj || !windowObj.document) return;
+      windowObj.document.querySelectorAll(".cm-editor").forEach((editor) => {
+        if (editor.classList) {
+          editor.classList.toggle("crisp-focus-typewriter-active", enabled);
+          editor.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
+        }
+        if (editor.style) {
+          if (enabled) {
+            editor.style.setProperty("--crisp-focus-typewriter-bottom-ratio", String(bottomRatio));
+            editor.style.setProperty("--crisp-focus-typewriter-offset-ratio", String(offsetRatio));
+          } else {
+            editor.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+            editor.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
+          }
+        }
+      });
+    });
+  }
+
+  clearTypewriterStyles() {
+    const windowObjects = this.windowBindings
+      ? Array.from(this.windowBindings.keys())
+      : [this.mainWindow];
+    windowObjects.forEach((windowObj) => {
+      if (!windowObj || !windowObj.document) return;
+      windowObj.document.querySelectorAll(".cm-editor.crisp-focus-typewriter-active, .cm-editor.crisp-focus-typewriter-padding").forEach((editor) => {
+        if (editor.classList) {
+          editor.classList.remove("crisp-focus-typewriter-active", "crisp-focus-typewriter-padding");
+        }
+        if (editor.style) {
+          editor.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+          editor.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
+        }
+      });
+    });
+  }
+
   async setFocusModeEnabled(enabled) {
     this.settings.focusModeEnabled = enabled;
     await this.saveSettings();
+    this.updateTypewriterStyles();
     if (!enabled) {
       this.clearCursorStyles();
+      this.clearTypewriterStyles();
       this.audio.stopAmbient();
       return;
     }
     this.audio.updateAmbient();
+    const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+    if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+      this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "focus-enable");
+    }
   }
 }
 

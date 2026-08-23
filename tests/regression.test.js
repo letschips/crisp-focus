@@ -166,8 +166,9 @@ function createWindow() {
   const documentObject = {
     activeElement,
     querySelectorAll(selector) {
-      if (selector === ".cm-editor.crisp-focus-active") return cursorEditors;
-      if (selector === ".cm-editor .cm-cursor") return cursorElements;
+      if (selector.includes(".cm-editor.crisp-focus-active")) return cursorEditors;
+      if (selector.includes(".cm-editor .cm-cursor")) return cursorElements;
+      if (selector.includes(".cm-editor")) return cursorEditors;
       return [];
     },
   };
@@ -223,6 +224,7 @@ function createObsidianMock() {
     addCommand() {}
     addSettingTab() {}
     registerEvent() {}
+    registerEditorExtension() {}
     addStatusBarItem() {
       return {
         classList: createClassList(),
@@ -254,6 +256,8 @@ module.exports.__test = {
   CrispFocusAudioEngine,
   CrispFocusLicenseManager: typeof CrispFocusLicenseManager === "function" ? CrispFocusLicenseManager : undefined,
   CrispFocusPlugin,
+  CrispTypewriterEngine: typeof CrispTypewriterEngine === "function" ? CrispTypewriterEngine : undefined,
+  createTypewriterExtension: typeof createTypewriterExtension === "function" ? createTypewriterExtension : undefined,
   FocusSessionController: typeof FocusSessionController === "function" ? FocusSessionController : undefined,
   FOCUS_SCENES: typeof FOCUS_SCENES === "object" ? FOCUS_SCENES : undefined,
   ensureCursorLayerPatched,
@@ -1161,4 +1165,173 @@ test("iOS screen keyboard: beforeinput insertText plays character sound without 
   CrispFocusPlugin.prototype.detachWindow.call(plugin, windowObject);
   windowObject.dispatch("beforeinput", { inputType: "insertText" });
   assert.equal(charSounds, 3, "detach 后监听器应已清理");
+});
+
+test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
+  const { CrispTypewriterEngine } = loadPluginInternals();
+  const mockPlugin = {
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "soft",
+      typewriterScrollOffset: 42, // target: 420px in 1000px height
+      typewriterScrollTolerance: 10, // band: 320px ~ 520px
+    },
+  };
+  const engine = new CrispTypewriterEngine(mockPlugin);
+
+  function createMockView(cursorTop) {
+    return {
+      scrollDOM: {
+        getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+        scrollTop: 100,
+        scrollHeight: 3000,
+        clientHeight: 1000,
+      },
+      state: {
+        selection: { main: { head: 10 } },
+      },
+      coordsAtPos: () => ({ top: cursorTop }),
+    };
+  }
+
+  // Inside tolerance band (e.g. 400px, 350px, 500px) -> delta should be 0
+  assert.equal(engine.calculateScrollDelta(createMockView(420)), 0, "Exact target should not scroll");
+  assert.equal(engine.calculateScrollDelta(createMockView(350)), 0, "Inside soft band should not scroll");
+  assert.equal(engine.calculateScrollDelta(createMockView(500)), 0, "Inside soft band should not scroll");
+
+  // Outside top band (e.g. 200px < 320px) -> delta should be negative (scroll up to 420)
+  // currentY(200) - targetY(420) = -220
+  assert.equal(engine.calculateScrollDelta(createMockView(200)), -220, "Above top band should scroll up");
+
+  // Outside bottom band (e.g. 700px > 520px) -> delta should be positive (scroll down to 420)
+  // currentY(700) - targetY(420) = +280
+  assert.equal(engine.calculateScrollDelta(createMockView(700)), 280, "Below bottom band should scroll down");
+});
+
+test("TypewriterEngine: Strict mode locks cursor precisely to target height", () => {
+  const { CrispTypewriterEngine } = loadPluginInternals();
+  const mockPlugin = {
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "strict",
+      typewriterScrollOffset: 42, // target: 420px in 1000px height
+    },
+  };
+  const engine = new CrispTypewriterEngine(mockPlugin);
+
+  function createMockView(cursorTop) {
+    return {
+      scrollDOM: {
+        getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+        scrollTop: 100,
+        scrollHeight: 3000,
+        clientHeight: 1000,
+      },
+      state: {
+        selection: { main: { head: 10 } },
+      },
+      coordsAtPos: () => ({ top: cursorTop }),
+    };
+  }
+
+  assert.equal(engine.calculateScrollDelta(createMockView(420)), 0, "Exact target delta is 0");
+  assert.equal(engine.calculateScrollDelta(createMockView(460)), 40, "Offset of +40px strictly moves +40px");
+  assert.equal(engine.calculateScrollDelta(createMockView(380)), -40, "Offset of -40px strictly moves -40px");
+});
+
+test("TypewriterEngine: user scroll pause and resume on user activity", () => {
+  const { CrispTypewriterEngine } = loadPluginInternals();
+  let scheduledScroll = null;
+  const mockPlugin = {
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "strict",
+      typewriterScrollOffset: 42,
+      typewriterScrollSmooth: false,
+    },
+    mainWindow: {
+      setTimeout: (fn) => setTimeout(fn, 50),
+      clearTimeout: (id) => clearTimeout(id),
+    },
+  };
+  const engine = new CrispTypewriterEngine(mockPlugin);
+
+  const mockView = {
+    scrollDOM: {
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+      scrollTop: 100,
+      scrollHeight: 3000,
+      clientHeight: 1000,
+    },
+    state: {
+      selection: { main: { head: 10 } },
+    },
+    coordsAtPos: () => ({ top: 600 }), // delta = 180
+  };
+
+  // Normal request scrolls
+  engine.requestScroll(mockView, "normal");
+  assert.equal(mockView.scrollDOM.scrollTop, 280, "Initial scroll applies delta");
+
+  // User manual scroll occurs -> suppresses typewriter scroll
+  mockView.scrollDOM.scrollTop = 500;
+  engine.onUserScroll();
+  assert.equal(engine.userScrolling, true);
+  engine.requestScroll(mockView, "during-user-scroll");
+  assert.equal(mockView.scrollDOM.scrollTop, 500, "Scroll should be suppressed while user is scrolling");
+
+  // User typing activity resumes typewriter scroll
+  engine.onUserActivity();
+  assert.equal(engine.userScrolling, false);
+  engine.requestScroll(mockView, "after-user-activity");
+  assert.equal(mockView.scrollDOM.scrollTop, 680, "Scroll resumes upon user activity");
+
+  engine.destroy();
+});
+
+test("Typewriter styles and toggle commands update editor classes and CSS variables", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const editor = {
+    classList: createClassList(),
+    style: createStyle(),
+  };
+  const cursor = { style: {} };
+  windowObject.addCursorFixture(editor, cursor);
+
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    focusModeEnabled: true,
+    typewriterScrollEnabled: true,
+    typewriterScrollMode: "soft",
+    typewriterScrollOffset: 42,
+    typewriterScrollTolerance: 10,
+    typewriterScrollBottomPadding: true,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  plugin.updateTypewriterStyles();
+
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), true);
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-padding"), true);
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-bottom-ratio"), "0.58");
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-offset-ratio"), "0.42");
+
+  // Switch to custom offset (50%)
+  await plugin.setTypewriterScrollOffset(50);
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-bottom-ratio"), "0.5");
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-offset-ratio"), "0.5");
+
+  // Toggle typewriter off
+  await plugin.setTypewriterScrollEnabled(false);
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), false);
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-padding"), false);
+
+  plugin.onunload();
 });

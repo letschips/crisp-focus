@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor & Local Ambient Engine (v1.3.4)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -9,6 +9,8 @@
   --crisp-focus-blink-rate: 1000ms;
   --crisp-focus-blink-count: 10;
   --crisp-focus-blink-easing: ease-in-out;
+  --crisp-focus-typewriter-bottom-ratio: 0.58;
+  --crisp-focus-typewriter-offset-ratio: 0.42;
 }
 
 .crisp-focus-session-status {
@@ -80,7 +82,18 @@
 }
 
 /* --------------------------------------------------------------------------
- * 2. Settings Collapsible Card Groups (Apple Spring Accordion)
+ * 2. Typewriter Scrolling & Bottom Viewport Padding
+ * -------------------------------------------------------------------------- */
+.cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content {
+  padding-bottom: calc(100vh * var(--crisp-focus-typewriter-bottom-ratio, 0.58)) !important;
+}
+
+.cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-scroller {
+  padding-bottom: 0 !important;
+}
+
+/* --------------------------------------------------------------------------
+ * 3. Settings Collapsible Card Groups (Apple Spring Accordion)
  * -------------------------------------------------------------------------- */
 .crisp-focus-setting-card {
   margin-bottom: 0.85rem;
