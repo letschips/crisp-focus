@@ -1335,3 +1335,54 @@ test("Typewriter styles and toggle commands update editor classes and CSS variab
 
   plugin.onunload();
 });
+
+test("TypewriterEngine: skips canvas nodes, modal prompts, and protects text range selections", () => {
+  const { CrispTypewriterEngine } = loadPluginInternals();
+  const mockPlugin = {
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "strict",
+      typewriterScrollOffset: 42,
+    },
+  };
+  const engine = new CrispTypewriterEngine(mockPlugin);
+
+  // 1. Canvas node editor view -> delta should be 0
+  const canvasView = {
+    dom: {
+      closest: (sel) => sel.includes("canvas-node") ? {} : null,
+    },
+    scrollDOM: {
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+    },
+    state: { selection: { main: { head: 10, empty: true } } },
+    coordsAtPos: () => ({ top: 700 }),
+  };
+  assert.equal(engine.calculateScrollDelta(canvasView), 0, "Canvas editor should be excluded from typewriter scrolling");
+
+  // 2. Active range selection (drag selection / text highlight) without typing -> delta should be 0
+  const rangeSelectionView = {
+    dom: { closest: () => null },
+    scrollDOM: {
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+    },
+    state: { selection: { main: { head: 100, empty: false, from: 10, to: 100 } } },
+    coordsAtPos: () => ({ top: 700 }),
+  };
+  assert.equal(engine.calculateScrollDelta(rangeSelectionView, false), 0, "Range selection should not scroll while dragging selection");
+  assert.equal(engine.calculateScrollDelta(rangeSelectionView, true), 280, "Typing over a range selection should scroll");
+
+  // 3. Virtualized line fallback via lineBlockAt when coordsAtPos returns null
+  const virtualizedView = {
+    dom: { closest: () => null },
+    scrollDOM: {
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+      scrollTop: 500,
+    },
+    state: { selection: { main: { head: 500, empty: true } } },
+    coordsAtPos: () => null, // temporarily outside viewport
+    lineBlockAt: () => ({ top: 1200, height: 24 }), // 1200 - 500 = 700px relative Y
+  };
+  assert.equal(engine.calculateScrollDelta(virtualizedView), 280, "Fallback to lineBlockAt when coordsAtPos is null");
+});

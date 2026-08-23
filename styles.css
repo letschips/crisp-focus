@@ -92,6 +92,14 @@
   padding-bottom: 0 !important;
 }
 
+/* Exclude Canvas node cards, modals, and prompt inputs from typewriter bottom padding */
+.canvas-node .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content,
+.canvas-node-content .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content,
+.modal .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content,
+.prompt .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content {
+  padding-bottom: 0 !important;
+}
+
 /* --------------------------------------------------------------------------
  * 3. Settings Collapsible Card Groups (Apple Spring Accordion)
  * -------------------------------------------------------------------------- */

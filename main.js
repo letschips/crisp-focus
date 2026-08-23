@@ -1010,25 +1010,54 @@ class CrispTypewriterEngine {
     this.userScrollTimeout = null;
   }
 
-  calculateScrollDelta(view) {
+  calculateScrollDelta(view, docChanged = false) {
     if (!view || !view.scrollDOM || !view.state || !view.state.selection) return 0;
     const settings = this.plugin?.settings;
     if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return 0;
 
+    // Avoid hijacking Canvas cards, prompt modals, or non-note editors
+    if (view.dom && typeof view.dom.closest === "function") {
+      if (view.dom.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal")) {
+        return 0;
+      }
+    }
+
     const mainSelection = view.state.selection.main;
     if (!mainSelection) return 0;
 
-    const pos = mainSelection.head;
-    const coords = typeof view.coordsAtPos === "function" ? view.coordsAtPos(pos) : null;
-    if (!coords) return 0;
+    // If user is selecting a text range (highlight drag) and not actively typing, don't jerk the viewport
+    const hasRangeSelection = mainSelection.empty === false || (
+      typeof mainSelection.from === "number" &&
+      typeof mainSelection.to === "number" &&
+      mainSelection.from !== mainSelection.to
+    );
+    if (hasRangeSelection && !docChanged) {
+      return 0;
+    }
 
+    const pos = mainSelection.head;
     const scrollDOM = view.scrollDOM;
     const editorRect = typeof scrollDOM.getBoundingClientRect === "function"
       ? scrollDOM.getBoundingClientRect()
       : null;
     if (!editorRect || editorRect.height <= 0) return 0;
 
-    const currentY = coords.top - editorRect.top;
+    let currentY;
+    const coords = typeof view.coordsAtPos === "function" ? view.coordsAtPos(pos) : null;
+    if (coords) {
+      currentY = coords.top - editorRect.top;
+    } else if (typeof view.lineBlockAt === "function") {
+      try {
+        const lineBlock = view.lineBlockAt(pos);
+        if (lineBlock) {
+          currentY = lineBlock.top - (scrollDOM.scrollTop || 0);
+        }
+      } catch (e) {
+        return 0;
+      }
+    }
+    if (currentY === undefined || Number.isNaN(currentY)) return 0;
+
     const targetRatio = (settings.typewriterScrollOffset ?? 42) / 100;
     const targetY = editorRect.height * targetRatio;
 
@@ -1048,24 +1077,24 @@ class CrispTypewriterEngine {
     }
   }
 
-  requestScroll(view, reason = "update") {
+  requestScroll(view, reason = "update", docChanged = false) {
     if (!view || !view.scrollDOM) return;
     if (this.userScrolling) return;
     if (this.plugin?.isComposing) return;
     const settings = this.plugin?.settings;
     if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return;
 
-    const delta = this.calculateScrollDelta(view);
-    if (Math.abs(delta) < 1) return;
+    const delta = this.calculateScrollDelta(view, docChanged);
+    if (Math.abs(delta) < 2) return;
 
     const scrollDOM = view.scrollDOM;
     const currentScrollTop = scrollDOM.scrollTop || 0;
     const scrollHeight = scrollDOM.scrollHeight || 0;
     const clientHeight = scrollDOM.clientHeight || 0;
     const maxScroll = Math.max(0, scrollHeight - clientHeight);
-    const newTargetScrollTop = Math.max(0, Math.min(maxScroll, currentScrollTop + delta));
+    const newTargetScrollTop = Math.max(0, Math.min(maxScroll, Math.round(currentScrollTop + delta)));
 
-    if (Math.abs(newTargetScrollTop - currentScrollTop) < 1) return;
+    if (Math.abs(newTargetScrollTop - currentScrollTop) < 2) return;
 
     const smooth = settings.typewriterScrollSmooth;
     if (!smooth) {
@@ -1163,7 +1192,7 @@ function createTypewriterExtension(plugin) {
         if (typeof win.requestAnimationFrame === "function") {
           this.rafId = win.requestAnimationFrame(() => {
             this.rafId = null;
-            plugin.typewriterEngine?.requestScroll(update.view, "update");
+            plugin.typewriterEngine?.requestScroll(update.view, update.docChanged ? "doc-change" : "selection", update.docChanged);
           });
         }
       }
@@ -1171,6 +1200,9 @@ function createTypewriterExtension(plugin) {
 
     applyEditorStyles() {
       if (!this.view || !this.view.dom) return;
+      if (typeof this.view.dom.closest === "function" && this.view.dom.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas']")) {
+        return;
+      }
       const enabled = Boolean(plugin.settings?.focusModeEnabled && plugin.settings?.typewriterScrollEnabled);
       const padEnabled = Boolean(enabled && plugin.settings?.typewriterScrollBottomPadding);
       const offsetRatio = (plugin.settings?.typewriterScrollOffset ?? 42) / 100;
@@ -1721,23 +1753,22 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(cursorCard)
       .setName("光标速度")
-      .setDesc("每次光标移动的速度（毫秒）。")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.cursorSpeed ?? 80))
+      .setDesc(`每次光标移动的过渡速度：${this.plugin.settings.cursorSpeed ?? 80} 毫秒。`)
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 200, 5)
+          .setValue(this.plugin.settings.cursorSpeed ?? 80)
+          .setDynamicTooltip()
           .onChange(async (val) => {
-            const num = parseInt(val, 10);
-            if (!isNaN(num) && num >= 0) {
-              this.plugin.markSceneCustom();
-              this.plugin.settings.cursorSpeed = num;
-              await this.plugin.saveSettings();
-            }
+            this.plugin.markSceneCustom();
+            this.plugin.settings.cursorSpeed = val;
+            await this.plugin.saveSettings();
           })
       )
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("恢复默认值（80）")
+          .setTooltip("恢复默认值（80ms）")
           .onClick(async () => {
             this.plugin.markSceneCustom();
             this.plugin.settings.cursorSpeed = 80;
@@ -1748,23 +1779,22 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(cursorCard)
       .setName("闪烁频率")
-      .setDesc("光标完整闪烁一次的时间（毫秒）。")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.blinkRate ?? 1000))
+      .setDesc(`光标完整闪烁一次的周期：${this.plugin.settings.blinkRate ?? 1000} 毫秒。`)
+      .addSlider((slider) =>
+        slider
+          .setLimits(400, 2000, 50)
+          .setValue(this.plugin.settings.blinkRate ?? 1000)
+          .setDynamicTooltip()
           .onChange(async (val) => {
-            const num = parseInt(val, 10);
-            if (!isNaN(num) && num >= 0) {
-              this.plugin.markSceneCustom();
-              this.plugin.settings.blinkRate = num;
-              await this.plugin.saveSettings();
-            }
+            this.plugin.markSceneCustom();
+            this.plugin.settings.blinkRate = val;
+            await this.plugin.saveSettings();
           })
       )
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("恢复默认值（1000）")
+          .setTooltip("恢复默认值（1000ms）")
           .onClick(async () => {
             this.plugin.markSceneCustom();
             this.plugin.settings.blinkRate = 1000;
@@ -1775,23 +1805,22 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(cursorCard)
       .setName("闪烁次数")
-      .setDesc("一次连续闪烁的上限；每次移动后重置，设为 0 时停止闪烁。")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.blinkCount ?? 10))
+      .setDesc(`一次连续闪烁上限：${this.plugin.settings.blinkCount ?? 10} 次（设为 0 时保持常亮）。`)
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 30, 1)
+          .setValue(this.plugin.settings.blinkCount ?? 10)
+          .setDynamicTooltip()
           .onChange(async (val) => {
-            const num = parseInt(val, 10);
-            if (!isNaN(num) && num >= 0) {
-              this.plugin.markSceneCustom();
-              this.plugin.settings.blinkCount = num;
-              await this.plugin.saveSettings();
-            }
+            this.plugin.markSceneCustom();
+            this.plugin.settings.blinkCount = val;
+            await this.plugin.saveSettings();
           })
       )
       .addExtraButton((btn) =>
         btn
           .setIcon("reset")
-          .setTooltip("恢复默认值（10）")
+          .setTooltip("恢复默认值（10次）")
           .onClick(async () => {
             this.plugin.markSceneCustom();
             this.plugin.settings.blinkCount = 10;
@@ -2129,6 +2158,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
         this.cursorPatchUninstallers
       );
       this.updateTypewriterStyles();
+      if (this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled && activeLeaf.editor.cm.hasFocus) {
+        this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "leaf-change");
+      }
     };
 
     this.registerEvent(this.app.workspace.on("active-leaf-change", tryPatchCursor));
@@ -2589,6 +2621,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     windowObjects.forEach((windowObj) => {
       if (!windowObj || !windowObj.document) return;
       windowObj.document.querySelectorAll(".cm-editor").forEach((editor) => {
+        if (typeof editor.closest === "function" && editor.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal")) {
+          return;
+        }
         if (editor.classList) {
           editor.classList.toggle("crisp-focus-typewriter-active", enabled);
           editor.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
