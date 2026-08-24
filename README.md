@@ -8,6 +8,8 @@ ambient soundscapes to Obsidian.
 - One Focus mode master switch that preserves individual feature choices.
 - Four atomic Focus scenes for silent, typewriter, rainy, and ocean writing.
 - Restorable 1–240 minute focus sessions with pause, resume, and status-bar controls.
+- Dual-mode typewriter scrolling with adjustable eye-line height, a soft tolerance band, and viewport-aware end padding.
+- Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes.
 - Adjustable animated cursor with reduced-motion support.
 - Five synthesized typing themes with a shared output limiter.
 - Four bundled local ambient soundscapes with normalized loudness.
@@ -18,7 +20,7 @@ ambient soundscapes to Obsidian.
 ## Focus scenes
 
 Choose a scene from the settings page or the command palette. A scene applies
-its cursor, typing feedback, and ambient sound choices as one atomic preset.
+its cursor, typewriter scrolling, typing feedback, and ambient sound choices as one atomic preset.
 `Silent writing` is available without activation. Scenes that contain paid
 audio stay locked until the current license is verified. Changing an
 individual scene-controlled setting marks the setup as `Custom`.

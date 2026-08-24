@@ -1096,7 +1096,17 @@ class CrispTypewriterEngine {
 
     if (Math.abs(newTargetScrollTop - currentScrollTop) < 2) return;
 
-    const smooth = settings.typewriterScrollSmooth;
+    const win = view.dom?.ownerDocument?.defaultView
+      || this.plugin?.mainWindow
+      || (typeof window !== "undefined" ? window : null);
+    let smooth = Boolean(settings.typewriterScrollSmooth);
+    if (smooth && typeof win?.matchMedia === "function") {
+      try {
+        smooth = !win.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      } catch (e) {
+        // Keep the saved preference when the host cannot evaluate media queries.
+      }
+    }
     if (!smooth) {
       scrollDOM.scrollTop = newTargetScrollTop;
       return;
@@ -1152,6 +1162,51 @@ class CrispTypewriterEngine {
   }
 }
 
+function applyTypewriterStylesToEditor(editor, settings) {
+  if (!editor) return;
+  const excluded = typeof editor.closest === "function" && Boolean(
+    editor.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal")
+  );
+  const enabled = Boolean(
+    !excluded
+    && settings?.focusModeEnabled
+    && settings?.typewriterScrollEnabled
+  );
+  const padEnabled = Boolean(enabled && settings?.typewriterScrollBottomPadding);
+  const offsetRatio = (settings?.typewriterScrollOffset ?? 42) / 100;
+  const bottomRatio = Math.max(0.2, Math.round((1 - offsetRatio) * 100) / 100);
+
+  if (editor.classList) {
+    editor.classList.toggle("crisp-focus-typewriter-active", enabled);
+    editor.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
+  }
+  if (!editor.style) return;
+
+  if (!enabled) {
+    editor.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+    editor.style.removeProperty("--crisp-focus-typewriter-bottom-space");
+    editor.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
+    return;
+  }
+
+  editor.style.setProperty("--crisp-focus-typewriter-bottom-ratio", String(bottomRatio));
+  editor.style.setProperty("--crisp-focus-typewriter-offset-ratio", String(offsetRatio));
+  const scroller = typeof editor.querySelector === "function"
+    ? editor.querySelector(".cm-scroller")
+    : null;
+  const viewportHeight = Number(scroller?.clientHeight)
+    || Number(scroller?.getBoundingClientRect?.().height)
+    || 0;
+  if (viewportHeight > 0) {
+    editor.style.setProperty(
+      "--crisp-focus-typewriter-bottom-space",
+      `${Math.round(viewportHeight * bottomRatio)}px`
+    );
+  } else {
+    editor.style.removeProperty("--crisp-focus-typewriter-bottom-space");
+  }
+}
+
 function createTypewriterExtension(plugin) {
   let cmView = null;
   try {
@@ -1167,18 +1222,21 @@ function createTypewriterExtension(plugin) {
     constructor(view) {
       this.view = view;
       this.rafId = null;
-      this.wheelHandler = () => {
+      this.userScrollHandler = () => {
         plugin.typewriterEngine?.onUserScroll();
       };
       if (view.scrollDOM) {
-        view.scrollDOM.addEventListener("wheel", this.wheelHandler, { passive: true });
-        view.scrollDOM.addEventListener("touchmove", this.wheelHandler, { passive: true });
-        view.scrollDOM.addEventListener("scroll", this.wheelHandler, { passive: true });
+        view.scrollDOM.addEventListener("wheel", this.userScrollHandler, { passive: true });
+        view.scrollDOM.addEventListener("touchmove", this.userScrollHandler, { passive: true });
+        view.scrollDOM.addEventListener("pointerdown", this.userScrollHandler, { passive: true });
       }
       this.applyEditorStyles();
     }
 
     update(update) {
+      if (update.geometryChanged) {
+        this.applyEditorStyles();
+      }
       if (!plugin.settings?.focusModeEnabled || !plugin.settings?.typewriterScrollEnabled) {
         return;
       }
@@ -1209,27 +1267,7 @@ function createTypewriterExtension(plugin) {
 
     applyEditorStyles() {
       if (!this.view || !this.view.dom) return;
-      if (typeof this.view.dom.closest === "function" && this.view.dom.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas']")) {
-        return;
-      }
-      const enabled = Boolean(plugin.settings?.focusModeEnabled && plugin.settings?.typewriterScrollEnabled);
-      const padEnabled = Boolean(enabled && plugin.settings?.typewriterScrollBottomPadding);
-      const offsetRatio = (plugin.settings?.typewriterScrollOffset ?? 42) / 100;
-      const bottomRatio = Math.max(0.2, Math.round((1 - offsetRatio) * 100) / 100);
-
-      if (this.view.dom.classList) {
-        this.view.dom.classList.toggle("crisp-focus-typewriter-active", enabled);
-        this.view.dom.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
-      }
-      if (this.view.dom.style) {
-        if (enabled) {
-          this.view.dom.style.setProperty("--crisp-focus-typewriter-bottom-ratio", String(bottomRatio));
-          this.view.dom.style.setProperty("--crisp-focus-typewriter-offset-ratio", String(offsetRatio));
-        } else {
-          this.view.dom.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
-          this.view.dom.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
-        }
-      }
+      applyTypewriterStylesToEditor(this.view.dom, plugin.settings);
     }
 
     destroy() {
@@ -1238,10 +1276,10 @@ function createTypewriterExtension(plugin) {
         win.cancelAnimationFrame(this.rafId);
         this.rafId = null;
       }
-      if (this.view && this.view.scrollDOM && this.wheelHandler) {
-        this.view.scrollDOM.removeEventListener("wheel", this.wheelHandler);
-        this.view.scrollDOM.removeEventListener("touchmove", this.wheelHandler);
-        this.view.scrollDOM.removeEventListener("scroll", this.wheelHandler);
+      if (this.view && this.view.scrollDOM && this.userScrollHandler) {
+        this.view.scrollDOM.removeEventListener("wheel", this.userScrollHandler);
+        this.view.scrollDOM.removeEventListener("touchmove", this.userScrollHandler);
+        this.view.scrollDOM.removeEventListener("pointerdown", this.userScrollHandler);
       }
       if (this.view && this.view.dom) {
         if (this.view.dom.classList) {
@@ -1249,6 +1287,7 @@ function createTypewriterExtension(plugin) {
         }
         if (this.view.dom.style) {
           this.view.dom.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+          this.view.dom.style.removeProperty("--crisp-focus-typewriter-bottom-space");
           this.view.dom.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
         }
       }
@@ -1561,7 +1600,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(containerEl)
       .setName("专注模式")
-      .setDesc("动效光标、打字音效与环境音的总体开关。")
+      .setDesc("动效光标、打字机定焦、打字音效与环境音的总体开关。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.focusModeEnabled)
@@ -1617,7 +1656,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const sceneGroup = createGroup(
       "专注场景",
-      "一键同步光标、打字反馈与环境音组合。",
+      "一键同步光标、定焦、打字反馈与环境音组合。",
       true
     );
 
@@ -1842,7 +1881,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 2: Typewriter Scrolling Engine
     const typewriterCard = createGroup(
       "打字机定焦",
-      "书写时光标与当前输入行始终保持在黄金视线高度。",
+      "书写时让当前输入行回到舒适的黄金视线高度。",
       true
     );
 
@@ -1920,7 +1959,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(typewriterCard)
       .setName("底部留白扩展")
-      .setDesc("为编辑器底部注入视口留白，让写到文章末尾时也能舒适定焦，无需在屏幕最底部打字。")
+      .setDesc("按当前编辑器窗格高度补足末尾留白；分屏或小窗里也不会留下过大的空白。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterScrollBottomPadding)
@@ -2347,8 +2386,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (this.audio) {
       this.audio.updateAmbient();
     }
+    this.updateTypewriterStyles();
     if (!this.settings.animatedCursorEnabled) {
       this.clearCursorStyles();
+    }
+    const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
+    if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
+      this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "scene-change");
     }
     return { applied: true, scene };
   }
@@ -2623,30 +2667,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const windowObjects = this.windowBindings
       ? Array.from(this.windowBindings.keys())
       : [this.mainWindow];
-    const enabled = Boolean(this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled);
-    const padEnabled = Boolean(enabled && this.settings.typewriterScrollBottomPadding);
-    const offsetRatio = (this.settings.typewriterScrollOffset ?? 42) / 100;
-    const bottomRatio = Math.max(0.2, Math.round((1 - offsetRatio) * 100) / 100);
-
     windowObjects.forEach((windowObj) => {
       if (!windowObj || !windowObj.document) return;
       windowObj.document.querySelectorAll(".cm-editor").forEach((editor) => {
-        if (typeof editor.closest === "function" && editor.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal")) {
-          return;
-        }
-        if (editor.classList) {
-          editor.classList.toggle("crisp-focus-typewriter-active", enabled);
-          editor.classList.toggle("crisp-focus-typewriter-padding", padEnabled);
-        }
-        if (editor.style) {
-          if (enabled) {
-            editor.style.setProperty("--crisp-focus-typewriter-bottom-ratio", String(bottomRatio));
-            editor.style.setProperty("--crisp-focus-typewriter-offset-ratio", String(offsetRatio));
-          } else {
-            editor.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
-            editor.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
-          }
-        }
+        applyTypewriterStylesToEditor(editor, this.settings);
       });
     });
   }
@@ -2663,6 +2687,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
         }
         if (editor.style) {
           editor.style.removeProperty("--crisp-focus-typewriter-bottom-ratio");
+          editor.style.removeProperty("--crisp-focus-typewriter-bottom-space");
           editor.style.removeProperty("--crisp-focus-typewriter-offset-ratio");
         }
       });

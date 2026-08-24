@@ -250,7 +250,7 @@ function createObsidianMock() {
   };
 }
 
-function loadPluginInternals() {
+function loadPluginInternals(options = {}) {
   const source = `${fs.readFileSync(pluginPath, "utf8")}
 module.exports.__test = {
   CrispFocusAudioEngine,
@@ -291,6 +291,9 @@ module.exports.__test = {
     module: { exports: {} },
     require(name) {
       if (name === "obsidian") return createObsidianMock();
+      if (name === "@codemirror/view" && options.codemirrorView) {
+        return options.codemirrorView;
+      }
       throw new Error(`Unexpected dependency: ${name}`);
     },
     setTimeout(callback) {
@@ -533,6 +536,45 @@ test("the free silent scene remains available without a license", async () => {
   assert.equal(plugin.settings.activeSceneId, "silent-writing");
   assert.equal(plugin.settings.typewriterAudioEnabled, false);
   assert.equal(plugin.settings.ambientSound, "off");
+  plugin.onunload();
+});
+
+test("applying a scene refreshes the live typewriter viewport immediately", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const editor = {
+    classList: createClassList(),
+    querySelector(selector) {
+      return selector === ".cm-scroller" ? { clientHeight: 1000 } : null;
+    },
+    style: createStyle(),
+  };
+  windowObject.addCursorFixture(editor, { style: {} });
+
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    focusModeEnabled: true,
+    typewriterScrollEnabled: false,
+    typewriterScrollOffset: 70,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  let scrollRequests = 0;
+  plugin.typewriterEngine.requestScroll = () => {
+    scrollRequests += 1;
+  };
+  plugin.app.workspace.getActiveViewOfType = () => ({ editor: { cm: {} } });
+
+  const result = await plugin.applyScene("silent-writing");
+
+  assert.equal(result.applied, true);
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), true);
+  assert.equal(editor.classList.contains("crisp-focus-typewriter-padding"), true);
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-offset-ratio"), "0.42");
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-bottom-space"), "580px");
+  assert.equal(scrollRequests, 1, "scene application should align the active editor without waiting for another keystroke");
   plugin.onunload();
 });
 
@@ -1290,6 +1332,147 @@ test("TypewriterEngine: user scroll pause and resume on user activity", () => {
   assert.equal(mockView.scrollDOM.scrollTop, 680, "Scroll resumes upon user activity");
 
   engine.destroy();
+});
+
+test("TypewriterEngine: reduced-motion preference disables smooth scrolling", () => {
+  const { CrispTypewriterEngine } = loadPluginInternals();
+  let smoothScrollCalls = 0;
+  const mockPlugin = {
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollMode: "strict",
+      typewriterScrollOffset: 42,
+      typewriterScrollSmooth: true,
+    },
+    mainWindow: {
+      matchMedia(query) {
+        return { matches: query === "(prefers-reduced-motion: reduce)" };
+      },
+    },
+  };
+  const engine = new CrispTypewriterEngine(mockPlugin);
+  const mockView = {
+    dom: { ownerDocument: { defaultView: mockPlugin.mainWindow } },
+    scrollDOM: {
+      clientHeight: 1000,
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+      scrollHeight: 3000,
+      scrollTop: 100,
+      scrollTo() {
+        smoothScrollCalls += 1;
+      },
+    },
+    state: { selection: { main: { head: 10 } } },
+    coordsAtPos: () => ({ top: 600 }),
+  };
+
+  engine.requestScroll(mockView, "reduced-motion");
+
+  assert.equal(smoothScrollCalls, 0, "reduced-motion should never invoke smooth scrolling");
+  assert.equal(mockView.scrollDOM.scrollTop, 280, "alignment should still happen instantly");
+});
+
+test("Typewriter ViewPlugin distinguishes user scroll intent from programmatic scroll events", () => {
+  const codemirrorView = {
+    ViewPlugin: {
+      fromClass(ViewPluginClass) {
+        return ViewPluginClass;
+      },
+    },
+  };
+  const { createTypewriterExtension } = loadPluginInternals({ codemirrorView });
+  const listeners = new Map();
+  const scrollDOM = {
+    clientHeight: 800,
+    addEventListener(type, callback) {
+      listeners.set(type, callback);
+    },
+    removeEventListener(type, callback) {
+      if (listeners.get(type) === callback) listeners.delete(type);
+    },
+  };
+  const style = createStyle();
+  const windowObject = {
+    cancelAnimationFrame() {},
+    requestAnimationFrame(callback) {
+      callback();
+      return 1;
+    },
+  };
+  let userScrollSignals = 0;
+  const plugin = {
+    mainWindow: windowObject,
+    settings: {
+      focusModeEnabled: true,
+      typewriterScrollBottomPadding: true,
+      typewriterScrollEnabled: true,
+      typewriterScrollOffset: 42,
+    },
+    typewriterEngine: {
+      onUserScroll() {
+        userScrollSignals += 1;
+      },
+    },
+  };
+  const view = {
+    dom: {
+      classList: createClassList(),
+      closest() {
+        return null;
+      },
+      ownerDocument: { defaultView: windowObject },
+      querySelector(selector) {
+        return selector === ".cm-scroller" ? scrollDOM : null;
+      },
+      style,
+    },
+    scrollDOM,
+  };
+  const TypewriterViewPlugin = createTypewriterExtension(plugin);
+  const instance = new TypewriterViewPlugin(view);
+
+  listeners.get("scroll")?.({});
+  assert.equal(userScrollSignals, 0, "programmatic scroll events must not pause typewriter alignment");
+  listeners.get("wheel")?.({});
+  listeners.get("touchmove")?.({});
+  listeners.get("pointerdown")?.({});
+  assert.equal(userScrollSignals, 3, "wheel, touch, and scrollbar pointer intent should pause alignment");
+
+  instance.destroy();
+  assert.equal(listeners.size, 0, "all user-intent listeners should be removed on destroy");
+});
+
+test("typewriter bottom padding follows each editor viewport instead of the app window", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const scroller = { clientHeight: 500 };
+  const editor = {
+    classList: createClassList(),
+    querySelector(selector) {
+      return selector === ".cm-scroller" ? scroller : null;
+    },
+    style: createStyle(),
+  };
+  windowObject.addCursorFixture(editor, { style: {} });
+
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    focusModeEnabled: true,
+    typewriterScrollBottomPadding: true,
+    typewriterScrollEnabled: true,
+    typewriterScrollOffset: 42,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  plugin.updateTypewriterStyles();
+
+  assert.equal(editor.style.getPropertyValue("--crisp-focus-typewriter-bottom-space"), "290px");
+  const styles = fs.readFileSync(stylesPath, "utf8");
+  assert.match(styles, /padding-bottom:\s*var\(--crisp-focus-typewriter-bottom-space,\s*0px\)/);
+  assert.doesNotMatch(styles, /padding-bottom:\s*calc\(100vh/);
+  plugin.onunload();
 });
 
 test("Typewriter styles and toggle commands update editor classes and CSS variables", async () => {

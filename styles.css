@@ -10,6 +10,7 @@
   --crisp-focus-blink-count: 10;
   --crisp-focus-blink-easing: ease-in-out;
   --crisp-focus-typewriter-bottom-ratio: 0.58;
+  --crisp-focus-typewriter-bottom-space: 0px;
   --crisp-focus-typewriter-offset-ratio: 0.42;
 }
 
@@ -85,7 +86,7 @@
  * 2. Typewriter Scrolling & Bottom Viewport Padding
  * -------------------------------------------------------------------------- */
 .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-content {
-  padding-bottom: calc(100vh * var(--crisp-focus-typewriter-bottom-ratio, 0.58)) !important;
+  padding-bottom: var(--crisp-focus-typewriter-bottom-space, 0px) !important;
 }
 
 .cm-editor.crisp-focus-typewriter-active.crisp-focus-typewriter-padding .cm-scroller {
