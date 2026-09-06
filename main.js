@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -96,17 +96,20 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
 
     try {
       const deviceId = app?.appId || (app?.vault?.getName ? "vault-" + encodeURIComponent(app.vault.getName()) : "device-default");
-      const res = await requestUrl({
-        url: "https://crisp-license.helloherve-xsn.workers.dev/api/verify-device",
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          licenseCode: trimmed,
-          deviceId: deviceId,
-          action: "activate",
-          pluginId: targetPluginId
-        })
-      });
+      const res = await Promise.race([
+        requestUrl({
+          url: "https://license.letschips.xyz/api/verify-device",
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseCode: trimmed,
+            deviceId: deviceId,
+            action: "activate",
+            pluginId: targetPluginId
+          })
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Crisp license check timeout")), 2500))
+      ]);
       const cloudResult = res.json;
       if (cloudResult && typeof cloudResult.valid === "boolean") {
         if (cloudResult.valid === false) {
