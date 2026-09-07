@@ -5,5 +5,6 @@
   "scripts": {
     "check": "node --check main.js && node --test tests/regression.test.js",
     "test": "node --test tests/regression.test.js"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }
