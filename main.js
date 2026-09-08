@@ -59,7 +59,7 @@ async function importEd25519PublicKey(pem, windowObj = window) {
   );
 }
 
-async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", app = null, windowObj = window) {
+async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", app = null, windowObj = window, options = {}) {
   const trimmed = (licenseCode || "").trim();
   if (!trimmed) return { valid: false, reason: "授权码为空" };
   const parts = trimmed.split(".");
@@ -93,6 +93,7 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
       new TextEncoder().encode(payloadBase64)
     );
     if (!isValid) return { valid: false, reason: "授权签名无效" };
+    if (options.skipOnline) return { valid: true, payload, source: "offline" };
 
     try {
       const deviceId = app?.appId || (app?.vault?.getName ? "vault-" + encodeURIComponent(app.vault.getName()) : "device-default");
@@ -161,18 +162,8 @@ class CrispFocusLicenseManager {
     this.windowObj = options.windowObj || window;
     this.status = { valid: false, reason: "尚未验证" };
 
-    if (this.settings && this.settings.licenseCode && typeof this.settings.licenseCode === "string" && this.settings.licenseCode.includes(".")) {
-      try {
-        const payloadBase64 = this.settings.licenseCode.split(".")[0];
-        const payloadJson = new TextDecoder().decode(base64UrlToUint8Array(payloadBase64));
-        const payload = JSON.parse(payloadJson);
-        if (CRISP_LICENSE_PRODUCTS.includes(payload.product)) {
-          this.status = { valid: true, payload, message: "本地验证成功", source: "offline" };
-        }
-      } catch (e) {
-        // ignore decode error during early constructor init
-      }
-    }
+    this.verificationId = 0;
+    this.backgroundVerification = null;
   }
 
   isEntitled() {
@@ -183,7 +174,17 @@ class CrispFocusLicenseManager {
     return this.status;
   }
 
+  async initialize() {
+    const id = ++this.verificationId;
+    const result = await this.verifier(this.settings.licenseCode, "crisp-focus", this.app, this.windowObj, { skipOnline: true });
+    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
+    this.status = result;
+    if (result.valid) this.backgroundVerification = this.verify();
+    return result;
+  }
+
   async verify(code = this.settings.licenseCode) {
+    const id = ++this.verificationId;
     const wasEntitled = this.isEntitled();
     let result;
     try {
@@ -191,6 +192,8 @@ class CrispFocusLicenseManager {
     } catch (error) {
       result = { valid: false, reason: `授权验证失败: ${error.message || error}` };
     }
+
+    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
 
     if (result.valid && result.source === "online") {
       this.settings.licenseLastOnlineAt = this.now();
@@ -2167,7 +2170,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (this.licenseVerifier) {
       await this.refreshLicense();
     } else {
-      void this.refreshLicense();
+      await this.licenseManager.initialize();
     }
     this.audio = new CrispFocusAudioEngine(
       this.app,

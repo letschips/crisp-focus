@@ -20,6 +20,7 @@ function loadVerifier(scenario) {
   let calls = 0;
   const requestUrl = async (options) => {
     calls++;
+    if (scenario.deferred) return scenario.deferred;
     if (scenario.network) throw new Error('network unavailable');
     if (scenario.timeout) return new Promise(() => {});
     // Obsidian RequestUrlParam: status >= 400 throws unless throw:false.
@@ -57,10 +58,17 @@ function loadVerifier(scenario) {
     } }).outputText;
   }
   const functionName = pluginId === 'crisp-base' ? 'verifyLicense' : pluginId === 'crisp-recall' ? 'verifyCrispRecallLicense' : 'verifyLicenseCode';
-  vm.runInNewContext(`${source}\nglobalThis.httpTestVerifier = ${functionName};`, context, { filename: 'license-under-test.js' });
+  vm.runInNewContext(`${source}\nglobalThis.httpTestVerifier = ${functionName}; globalThis.httpTestManager = CrispFocusLicenseManager;`, context, { filename: 'license-under-test.js' });
   return {
     verify(code) {
       return pluginId === 'crisp-recall' ? context.httpTestVerifier(code, { online: true }) : context.httpTestVerifier(code, pluginId);
+    },
+    createManager(code, onLost = () => {}) {
+      const settings = { licenseCode: code };
+      const app = { workspace: { getLeavesOfType: () => [{ view: { render: onLost } }] } };
+      return pluginId === 'crisp-visual'
+        ? new context.httpTestManager(app, { settings, saveSettings: async () => {} })
+        : new context.httpTestManager(app, settings, { onEntitlementLost: onLost });
     },
     calls: () => calls,
     cleanup: () => { for (const timer of timers) clearTimeout(timer); },
@@ -103,3 +111,52 @@ for (const kind of ['expired', 'bad signature']) {
     } finally { verifier.cleanup(); }
   });
 }
+
+for (const kind of ['valid', 'expired', 'bad signature']) {
+  test(`startup remains unverified for ${kind} code until cryptographic check`, async () => {
+    const scenario = { status: 403, body: { valid: false, reason: 'revoked' } };
+    const harness = loadVerifier(scenario);
+    try {
+      let code = makeCode(kind === 'expired' ? { expiresAt: '2020-01-01T00:00:00Z' } : {});
+      if (kind === 'bad signature') code = `${code.split('.')[0]}.${Buffer.alloc(64).toString('base64url')}`;
+      const manager = harness.createManager(code);
+      assert.equal(manager.isEntitled(), false);
+      const local = await manager.initialize();
+      assert.equal(local.valid, kind === 'valid');
+      if (kind !== 'valid') assert.equal(harness.calls(), 0);
+      else {
+        await manager.backgroundVerification;
+        assert.equal(manager.isEntitled(), false);
+      }
+    } finally { harness.cleanup(); }
+  });
+}
+test('local success grants access without waiting for network, then denial revokes it', async () => {
+  let finish;
+  const scenario = { deferred: new Promise(resolve => { finish = resolve; }) };
+  const harness = loadVerifier(scenario);
+  let revoked = 0;
+  try {
+    const manager = harness.createManager(makeCode(), () => { revoked++; });
+    assert.equal((await manager.initialize()).valid, true);
+    assert.equal(manager.isEntitled(), true);
+    finish({ status: 403, json: { valid: false, reason: 'revoked' } });
+    await manager.backgroundVerification;
+    assert.equal(manager.isEntitled(), false);
+    assert.equal(revoked, 1);
+  } finally { harness.cleanup(); }
+});
+test('a stale online approval cannot overwrite a newer failed verification', async () => {
+  let finish;
+  const scenario = { deferred: new Promise(resolve => { finish = resolve; }) };
+  const harness = loadVerifier(scenario);
+  try {
+    const manager = harness.createManager(makeCode());
+    await manager.initialize();
+    const old = manager.backgroundVerification;
+    await manager.verify('invalid');
+    finish({ status: 200, json: { valid: true } });
+    await old;
+    assert.equal(manager.isEntitled(), false);
+  } finally { harness.cleanup(); }
+});
