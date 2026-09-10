@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.3)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -2514,6 +2514,22 @@ class CrispFocusPlugin extends obsidian.Plugin {
     });
   }
 
+  // Key sounds should follow any host that actually receives text input, not only
+  // the Markdown editor — otherwise plugins that render their own editor (e.g.
+  // Crisp Mind's inline <input>) stay silent while IME confirm sounds still fire.
+  isAudioHostTarget(activeEl) {
+    if (!activeEl) return false;
+    const tag = activeEl.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return true;
+    if (activeEl.isContentEditable) return true;
+    return Boolean(
+      activeEl.closest
+      && activeEl.closest(
+        ".cm-editor, .markdown-source-view, .cm-content, .markdown-rendered, .canvas-node, .canvas-node-content"
+      )
+    );
+  }
+
   attachWindow(windowObj) {
     if (!windowObj || this.windowBindings.has(windowObj)) return;
     const state = { isComposing: false, lastCharKeydownAt: 0 };
@@ -2552,13 +2568,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
 
       const activeEl = windowObj.document.activeElement;
-      const isEditor = activeEl && (
-        activeEl.closest(".cm-editor, .markdown-source-view, .cm-content, .markdown-rendered") ||
-        activeEl.classList.contains("cm-content") ||
-        activeEl.tagName === "TEXTAREA" ||
-        activeEl.getAttribute("contenteditable") === "true"
-      );
-      if (!isEditor) return;
+      if (!this.isAudioHostTarget(activeEl)) return;
 
       const key = evt.key;
       if (state.isComposing) {
@@ -2590,13 +2600,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (evt.inputType !== "insertText" && evt.inputType !== "insertCompositionText") return;
       if (Date.now() - state.lastCharKeydownAt < 80) return;
       const activeEl = windowObj.document.activeElement;
-      const isEditor = activeEl && (
-        activeEl.closest(".cm-editor, .markdown-source-view, .cm-content, .markdown-rendered") ||
-        activeEl.classList.contains("cm-content") ||
-        activeEl.tagName === "TEXTAREA" ||
-        activeEl.getAttribute("contenteditable") === "true"
-      );
-      if (!isEditor) return;
+      if (!this.isAudioHostTarget(activeEl)) return;
       this.audio.playCharKey();
     };
 

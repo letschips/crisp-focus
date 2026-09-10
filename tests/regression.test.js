@@ -219,6 +219,22 @@ function createWindow() {
   return { context, windowObject };
 }
 
+// Minimal stand-in for whatever element currently owns focus. The key-sound gate must
+// accept every host that really receives text input, not only the CodeMirror editor.
+function createHost({ tagName, contentEditable = false, ancestors = [] }) {
+  return {
+    tagName,
+    isContentEditable: contentEditable,
+    classList: createClassList(),
+    closest(selector) {
+      return ancestors.some((ancestor) => selector.includes(ancestor)) ? {} : null;
+    },
+    getAttribute(name) {
+      return name === "contenteditable" ? (contentEditable ? "true" : null) : null;
+    },
+  };
+}
+
 function createObsidianMock() {
   class Plugin {
     addCommand() {}
@@ -1568,4 +1584,86 @@ test("TypewriterEngine: skips canvas nodes, modal prompts, and protects text ran
     lineBlockAt: () => ({ top: 1200, height: 24 }), // 1200 - 500 = 700px relative Y
   };
   assert.equal(engine.calculateScrollDelta(virtualizedView), 280, "Fallback to lineBlockAt when coordsAtPos is null");
+});
+
+test("inline input hosts outside the Markdown editor receive key sounds", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    focusModeEnabled: true,
+    typewriterAudioEnabled: true,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  let characters = 0;
+  plugin.audio.playCharKey = () => {
+    characters += 1;
+  };
+
+  // Crisp Mind edits node text through a plain <input>, not a CodeMirror content host.
+  windowObject.document.activeElement = createHost({ tagName: "INPUT" });
+  windowObject.dispatch("keydown", {
+    altKey: false,
+    ctrlKey: false,
+    key: "a",
+    metaKey: false,
+  });
+  assert.equal(characters, 1, "typing in an inline input should play a key sound");
+
+  windowObject.document.activeElement = createHost({
+    tagName: "DIV",
+    contentEditable: true,
+  });
+  windowObject.dispatch("keydown", {
+    altKey: false,
+    ctrlKey: false,
+    key: "b",
+    metaKey: false,
+  });
+  assert.equal(characters, 2, "contenteditable hosts should keep playing key sounds");
+
+  plugin.onunload();
+});
+
+test("key sounds stay silent when focus is not in a text input", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({
+    focusModeEnabled: true,
+    typewriterAudioEnabled: true,
+  });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  let characters = 0;
+  plugin.audio.playCharKey = () => {
+    characters += 1;
+  };
+
+  windowObject.document.activeElement = createHost({ tagName: "DIV" });
+  windowObject.dispatch("keydown", {
+    altKey: false,
+    ctrlKey: false,
+    key: "a",
+    metaKey: false,
+  });
+  assert.equal(characters, 0, "a non-editable surface must not play key sounds");
+
+  windowObject.document.activeElement = null;
+  windowObject.dispatch("keydown", {
+    altKey: false,
+    ctrlKey: false,
+    key: "b",
+    metaKey: false,
+  });
+  assert.equal(characters, 0, "a missing active element must not play key sounds");
+
+  plugin.onunload();
 });
