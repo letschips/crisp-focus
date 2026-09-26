@@ -12,6 +12,7 @@ ambient soundscapes to Obsidian.
 - Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes.
 - Adjustable animated cursor with reduced-motion support.
 - Five synthesized typing themes with a shared output limiter.
+- Independent space/IME confirmation and Enter bell switches. The space preference survives scene changes.
 - Four bundled local ambient soundscapes with normalized loudness.
 - IME-aware typing feedback and pop-out window support.
 - Local Ed25519 signature validation with online device verification.

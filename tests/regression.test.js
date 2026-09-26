@@ -1667,3 +1667,79 @@ test("key sounds stay silent when focus is not in a text input", async () => {
 
   plugin.onunload();
 });
+
+// Audio event regressions: authored before the 1.4.4 implementation.
+async function setupAudioRegression(settings = {}) {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject, context } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ typewriterAudioEnabled: true, ...settings });
+  plugin.saveData = async () => {};
+  grantTestLicense(plugin);
+  await plugin.onload();
+  return { plugin, windowObject, context };
+}
+
+test('space preference defaults on and silences only space/confirmation across themes', async () => {
+  const { plugin, context } = await setupAudioRegression();
+  try {
+    assert.equal(plugin.settings.typewriterSpaceEnabled, true);
+    for (const theme of ['typewriter', 'mechanical', 'raindrop', 'retro8bit', 'woodenFish']) {
+      plugin.settings.soundTheme = theme;
+      plugin.settings.typewriterSpaceEnabled = false;
+      const before = context.calls.oscillatorStarts + context.calls.bufferSourceStarts;
+      plugin.audio.playSpaceKey();
+      assert.equal(context.calls.oscillatorStarts + context.calls.bufferSourceStarts, before, theme);
+      plugin.audio.playEnterKey();
+      assert.ok(context.calls.oscillatorStarts + context.calls.bufferSourceStarts > before, theme);
+    }
+  } finally { plugin.onunload(); }
+});
+
+test('desktop space keydown and beforeinput produce one sound', async () => {
+  const { plugin, windowObject } = await setupAudioRegression();
+  try {
+    let count = 0;
+    plugin.audio.playSpaceKey = plugin.audio.playCharKey = () => count++;
+    windowObject.dispatch('keydown', { key: ' ' });
+    windowObject.dispatch('beforeinput', { inputType: 'insertText', data: ' ' });
+    assert.equal(count, 1);
+  } finally { plugin.onunload(); }
+});
+
+test('mobile space respects muted space preference without muting ordinary typing', async () => {
+  const { plugin, windowObject, context } = await setupAudioRegression({ typewriterSpaceEnabled: false });
+  try {
+    windowObject.dispatch('beforeinput', { inputType: 'insertText', data: ' ' });
+    assert.equal(context.calls.oscillatorStarts + context.calls.bufferSourceStarts, 0);
+    windowObject.dispatch('beforeinput', { inputType: 'insertText', data: 'a' });
+    assert.ok(context.calls.oscillatorStarts + context.calls.bufferSourceStarts > 0);
+  } finally { plugin.onunload(); }
+});
+
+test('IME cancellation and non-editor composition end stay silent', async () => {
+  const { plugin, windowObject } = await setupAudioRegression();
+  try {
+    let count = 0;
+    plugin.audio.playSpaceKey = () => count++;
+    windowObject.dispatch('compositionstart', {});
+    windowObject.dispatch('compositionend', { data: '' });
+    assert.equal(count, 0);
+    windowObject.document.activeElement = { tagName: 'BUTTON', closest: () => null };
+    windowObject.dispatch('compositionend', { data: '中' });
+    assert.equal(count, 0);
+  } finally { plugin.onunload(); }
+});
+
+test('IME commit followed by insertText does not play a second sound', async () => {
+  const { plugin, windowObject } = await setupAudioRegression();
+  try {
+    let count = 0;
+    plugin.audio.playSpaceKey = plugin.audio.playCharKey = () => count++;
+    windowObject.dispatch('compositionstart', {});
+    windowObject.dispatch('compositionend', { data: '中' });
+    windowObject.dispatch('beforeinput', { inputType: 'insertText', data: '中' });
+    assert.equal(count, 1);
+  } finally { plugin.onunload(); }
+});

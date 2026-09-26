@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.3)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.4)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -227,12 +227,13 @@ function around(target, patches) {
 // 1. Multi-Theme WebAudio Keypress & HD Local MP3 Ambient Audio Engine
 // --------------------------------------------------------------------------
 class CrispFocusAudioEngine {
-  constructor(app, getEnabled, getTheme, getVolume, getBellEnabled, getAmbientSound, getAmbientVol, windowObj) {
+  constructor(app, getEnabled, getTheme, getVolume, getBellEnabled, getAmbientSound, getAmbientVol, windowObj, getSpaceEnabled = () => true) {
     this.app = app;
     this.getEnabled = getEnabled;
     this.getTheme = getTheme;
     this.getVolume = getVolume;
     this.getBellEnabled = getBellEnabled;
+    this.getSpaceEnabled = getSpaceEnabled;
     this.getAmbientSound = getAmbientSound;
     this.getAmbientVol = getAmbientVol;
     this.windowObj = windowObj;
@@ -414,6 +415,12 @@ class CrispFocusAudioEngine {
 
   // 1.2 Spacebar / IME Confirm
   playSpaceKey() {
+    if (!this.getSpaceEnabled()) return;
+    this.playSpaceImpact();
+  }
+
+  // Shared key body; Enter must remain independent of the space preference.
+  playSpaceImpact() {
     if (!this.getEnabled()) return;
     this.unlock();
     if (!this.ctx) return;
@@ -665,7 +672,7 @@ class CrispFocusAudioEngine {
       }
       return;
     } else {
-      this.playSpaceKey();
+      this.playSpaceImpact();
     }
 
     if (this.getBellEnabled() && theme !== "woodenFish" && theme !== "retro8bit") {
@@ -1576,6 +1583,7 @@ const DEFAULT_SETTINGS = {
   soundTheme: "typewriter", // typewriter, mechanical, raindrop, retro8bit, woodenFish
   typewriterVolume: 0.7,
   typewriterBellEnabled: true,
+  typewriterSpaceEnabled: true,
   ambientSound: "off", // off, rain, campfire, ocean, wind
   ambientVolume: 0.65,
   licenseCode: "",
@@ -2076,6 +2084,18 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(audioCard)
+      .setName("空格与选字提示音")
+      .setDesc("空格键或输入法确认选字时播放提示音；关闭后不影响普通打字和回车音效。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.typewriterSpaceEnabled)
+          .onChange(async (val) => {
+            this.plugin.settings.typewriterSpaceEnabled = val;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new obsidian.Setting(audioCard)
       .setName("回车提示音")
       .setDesc("按 Enter 时播放铃声或提示音。")
       .addToggle((toggle) =>
@@ -2184,7 +2204,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
         ? (this.settings.ambientSound || "off")
         : "off",
       () => this.settings.ambientVolume ?? 0.65,
-      winObj
+      winObj,
+      () => this.settings.typewriterSpaceEnabled !== false
     );
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.classList.add("crisp-focus-session-status");
@@ -2541,9 +2562,12 @@ class CrispFocusPlugin extends obsidian.Plugin {
       state.isComposing = true;
       this.isComposing = true;
     };
-    const compositionEndHandler = () => {
+    const compositionEndHandler = (evt) => {
       state.isComposing = false;
       this.isComposing = false;
+      // Cancellation is not a commit; restrict feedback to actual input hosts.
+      if (evt.data === "" || !this.isAudioHostTarget(windowObj.document.activeElement)) return;
+      state.lastCharKeydownAt = Date.now();
       if (this.settings.focusModeEnabled && this.settings.typewriterAudioEnabled) {
         this.audio.playSpaceKey();
       }
@@ -2571,7 +2595,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (!this.isAudioHostTarget(activeEl)) return;
 
       const key = evt.key;
-      if (state.isComposing) {
+      if (state.isComposing || evt.isComposing || evt.keyCode === 229) {
         if (key.length === 1 && key !== " ") {
           state.lastCharKeydownAt = Date.now();
           this.audio.playCharKey();
@@ -2581,6 +2605,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (key === "Enter") {
         this.audio.playEnterKey();
       } else if (key === " ") {
+        state.lastCharKeydownAt = Date.now();
         this.audio.playSpaceKey();
       } else if (key === "Backspace" || key === "Delete") {
         this.audio.playBackspaceKey();
@@ -2601,7 +2626,12 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (Date.now() - state.lastCharKeydownAt < 80) return;
       const activeEl = windowObj.document.activeElement;
       if (!this.isAudioHostTarget(activeEl)) return;
-      this.audio.playCharKey();
+      if (evt.data === "") return;
+      if (evt.data === " " && !state.isComposing && !evt.isComposing) {
+        this.audio.playSpaceKey();
+      } else {
+        this.audio.playCharKey();
+      }
     };
 
     windowObj.addEventListener("pointerdown", gestureHandler, { capture: true, passive: true });

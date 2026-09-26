@@ -1,9 +1,24 @@
 # Changelog
 
+## 1.4.4
+
+- 新增“空格与选字提示音”独立开关，默认开启；切换场景保留该偏好，不影响普通打字和回车音效。
+- 修复桌面空格及输入法提交后重复播放按键音、移动键盘空格绕过提示音设置的问题。
+- 取消输入法组合输入、非编辑区域结束组合输入时不再播放确认音。
+
 ## 1.4.3
 
 - 修复在思维导图等第三方编辑器内打字时缺少按键音效的问题：打字音效现在与空格、回车确认音保持一致，在所有文本输入位置都生效。
 - 授权校验升级：启动即完成签名校验，授权状态变化后立即生效。
+
+## 1.4.2
+
+- 优化体验。
+
+## 1.4.1 — Crisp Focus Release
+
+- 优化日常使用体验与界面响应速度。
+- 提升连接稳定性与离线运行流畅度。
 
 ## 1.4.0
 
@@ -136,3 +151,7 @@
 - Normalized bundled ambient tracks and reduced their bitrate to 192 kbps.
 - Added reduced-motion styling and simplified the settings interface.
 - Added regression tests and a repeatable validation command.
+
+## 1.0.0
+
+- 初始版本，最低兼容 Obsidian 0.15.0。
