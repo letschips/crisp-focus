@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.4)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.5)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1244,6 +1244,13 @@ function applyTypewriterStylesToEditor(editor, settings) {
   }
 }
 
+function isPointerSelectionUpdate(update) {
+  const transactions = Array.isArray(update?.transactions) ? update.transactions : [];
+  return transactions.length > 0 && transactions.every((tr) =>
+    typeof tr?.isUserEvent === "function" && tr.isUserEvent("select.pointer")
+  );
+}
+
 function createTypewriterExtension(plugin) {
   let cmView = null;
   try {
@@ -1280,6 +1287,11 @@ function createTypewriterExtension(plugin) {
       // Only typewriter scroll on actual content typing or cursor movement
       // DO NOT auto-scroll on pure viewport scrolling (mouse wheel / trackpad / scrollbar)
       if (!update.docChanged && !update.selectionSet) {
+        return;
+      }
+      // Clicking or drag-selecting must not move the page under the mouse;
+      // the next keystroke re-centres the line.
+      if (!update.docChanged && isPointerSelectionUpdate(update)) {
         return;
       }
 
@@ -1626,6 +1638,18 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
     this.licenseDraft = plugin.settings?.licenseCode || "";
+    // Re-rendering must not collapse cards the user opened (or reopen closed ones).
+    this.groupOpenState = new Map();
+    this.sessionControlSetting = null;
+  }
+
+  onSessionUpdate(snapshot, reason) {
+    if (!this.sessionControlSetting || !this.containerEl?.isConnected) return;
+    if (reason === "tick") {
+      this.sessionControlSetting.setDesc(`剩余 ${formatSessionRemaining(snapshot.remainingMs)}`);
+    } else if (reason === "complete") {
+      this.display();
+    }
   }
 
   display() {
@@ -1647,7 +1671,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    const createGroup = (title, description, open = true) => {
+    const createGroup = (title, description, defaultOpen = true) => {
+      const open = this.groupOpenState.has(title) ? this.groupOpenState.get(title) : defaultOpen;
       const details = containerEl.createEl("details", {
         cls: `crisp-focus-setting-card${open ? " is-open" : ""}`,
       });
@@ -1674,6 +1699,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         if (details.classList.contains("is-closing")) {
           return;
         }
+        this.groupOpenState.set(title, !details.open);
         if (details.open) {
           details.classList.remove("is-open");
           details.classList.add("is-closing");
@@ -1731,16 +1757,26 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     new obsidian.Setting(sessionGroup)
       .setName("默认时长")
       .setDesc("设置 1–240 分钟；命令面板另提供 25 与 50 分钟快捷入口。")
-      .addText((text) => text
-        .setValue(String(this.plugin.settings.sessionDurationMinutes || 25))
-        .onChange(async (value) => {
-          const minutes = Math.max(1, Math.min(240, Math.round(Number(value) || 25)));
-          this.plugin.settings.sessionDurationMinutes = minutes;
-          await this.plugin.saveSettings();
-          this.plugin.renderSessionStatus(this.plugin.session.getSnapshot());
-        }));
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "1";
+        text.inputEl.max = "240";
+        text
+          .setValue(String(this.plugin.settings.sessionDurationMinutes || 25))
+          .onChange(async (value) => {
+            if (String(value).trim() === "") return;
+            const minutes = Math.max(1, Math.min(240, Math.round(Number(value) || 25)));
+            this.plugin.settings.sessionDurationMinutes = minutes;
+            await this.plugin.saveSettings();
+            this.plugin.renderSessionStatus(this.plugin.session.getSnapshot());
+          });
+        // Show the value that was actually saved (clamped) once editing ends.
+        text.inputEl.addEventListener("blur", () => {
+          text.setValue(String(this.plugin.settings.sessionDurationMinutes || 25));
+        });
+      });
 
-    new obsidian.Setting(sessionGroup)
+    this.sessionControlSetting = new obsidian.Setting(sessionGroup)
       .setName("会话控制")
       .setDesc(sessionSnapshot.status === "idle"
         ? "当前没有进行中的会话。"
@@ -1838,9 +1874,10 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    new obsidian.Setting(cursorCard)
+    const speedDesc = (val) => `每次光标移动的过渡速度：${val} 毫秒。`;
+    const speedSetting = new obsidian.Setting(cursorCard)
       .setName("光标速度")
-      .setDesc(`每次光标移动的过渡速度：${this.plugin.settings.cursorSpeed ?? 80} 毫秒。`)
+      .setDesc(speedDesc(this.plugin.settings.cursorSpeed ?? 80))
       .addSlider((slider) =>
         slider
           .setLimits(0, 200, 5)
@@ -1849,6 +1886,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .onChange(async (val) => {
             this.plugin.markSceneCustom();
             this.plugin.settings.cursorSpeed = val;
+            speedSetting.setDesc(speedDesc(val));
             await this.plugin.saveSettings();
           })
       )
@@ -1864,9 +1902,10 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    new obsidian.Setting(cursorCard)
+    const blinkRateDesc = (val) => `光标完整闪烁一次的周期：${val} 毫秒。`;
+    const blinkRateSetting = new obsidian.Setting(cursorCard)
       .setName("闪烁频率")
-      .setDesc(`光标完整闪烁一次的周期：${this.plugin.settings.blinkRate ?? 1000} 毫秒。`)
+      .setDesc(blinkRateDesc(this.plugin.settings.blinkRate ?? 1000))
       .addSlider((slider) =>
         slider
           .setLimits(400, 2000, 50)
@@ -1875,6 +1914,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .onChange(async (val) => {
             this.plugin.markSceneCustom();
             this.plugin.settings.blinkRate = val;
+            blinkRateSetting.setDesc(blinkRateDesc(val));
             await this.plugin.saveSettings();
           })
       )
@@ -1890,9 +1930,10 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    new obsidian.Setting(cursorCard)
+    const blinkCountDesc = (val) => `一次连续闪烁上限：${val} 次（设为 0 时保持常亮）。`;
+    const blinkCountSetting = new obsidian.Setting(cursorCard)
       .setName("闪烁次数")
-      .setDesc(`一次连续闪烁上限：${this.plugin.settings.blinkCount ?? 10} 次（设为 0 时保持常亮）。`)
+      .setDesc(blinkCountDesc(this.plugin.settings.blinkCount ?? 10))
       .addSlider((slider) =>
         slider
           .setLimits(0, 30, 1)
@@ -1901,6 +1942,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .onChange(async (val) => {
             this.plugin.markSceneCustom();
             this.plugin.settings.blinkCount = val;
+            blinkCountSetting.setDesc(blinkCountDesc(val));
             await this.plugin.saveSettings();
           })
       )
@@ -1949,9 +1991,16 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    new obsidian.Setting(typewriterCard)
+    const offsetDesc = (val) => `当前光标定焦位置：屏幕高度的 ${val}%。`;
+    const toleranceDesc = () => {
+      const offset = this.plugin.settings.typewriterScrollOffset ?? 42;
+      const tolerance = this.plugin.settings.typewriterScrollTolerance ?? 10;
+      return `光标自由活动范围：±${tolerance}%（即 ${Math.max(0, offset - tolerance)}% ~ ${Math.min(100, offset + tolerance)}%）。`;
+    };
+    let toleranceSetting = null;
+    const offsetSetting = new obsidian.Setting(typewriterCard)
       .setName("黄金视线高度")
-      .setDesc(`当前光标定焦位置：屏幕高度的 ${this.plugin.settings.typewriterScrollOffset ?? 42}%。`)
+      .setDesc(offsetDesc(this.plugin.settings.typewriterScrollOffset ?? 42))
       .addSlider((slider) =>
         slider
           .setLimits(20, 80, 1)
@@ -1959,6 +2008,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (val) => {
             await this.plugin.setTypewriterScrollOffset(val);
+            offsetSetting.setDesc(offsetDesc(this.plugin.settings.typewriterScrollOffset));
+            toleranceSetting?.setDesc(toleranceDesc());
           })
       )
       .addExtraButton((btn) =>
@@ -1972,9 +2023,9 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       );
 
     if ((this.plugin.settings.typewriterScrollMode || "soft") === "soft") {
-      new obsidian.Setting(typewriterCard)
+      toleranceSetting = new obsidian.Setting(typewriterCard)
         .setName("平滑区间容差")
-        .setDesc(`光标自由活动范围：±${this.plugin.settings.typewriterScrollTolerance ?? 10}%（即 ${(this.plugin.settings.typewriterScrollOffset ?? 42) - (this.plugin.settings.typewriterScrollTolerance ?? 10)}% ~ ${(this.plugin.settings.typewriterScrollOffset ?? 42) + (this.plugin.settings.typewriterScrollTolerance ?? 10)}%）。`)
+        .setDesc(toleranceDesc())
         .addSlider((slider) =>
           slider
             .setLimits(5, 25, 1)
@@ -1982,6 +2033,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
             .setDynamicTooltip()
             .onChange(async (val) => {
               await this.plugin.setTypewriterScrollTolerance(val);
+              toleranceSetting?.setDesc(toleranceDesc());
             })
         )
         .addExtraButton((btn) =>
@@ -2080,6 +2132,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
             this.plugin.markSceneCustom();
             this.plugin.settings.typewriterVolume = val;
             await this.plugin.saveSettings();
+            this.plugin.audio.playCharKey();
           })
       );
 
@@ -2170,7 +2223,8 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 // --------------------------------------------------------------------------
 class CrispFocusPlugin extends obsidian.Plugin {
   async onload() {
-    const savedSettings = await this.loadData() || {};
+    this.settingsWriteBlocked = false;
+    const savedSettings = await this.loadSavedSettings();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
     if (!Object.prototype.hasOwnProperty.call(savedSettings, "activeSceneId")) {
       this.settings.activeSceneId = Object.keys(savedSettings).length > 0
@@ -2200,7 +2254,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
       () => this.settings.soundTheme || "typewriter",
       () => this.settings.typewriterVolume,
       () => this.settings.typewriterBellEnabled,
-      () => this.settings.focusModeEnabled && this.licenseManager.isEntitled()
+      () => this.settings.focusModeEnabled
+        && this.licenseManager.isEntitled()
+        && this.session?.getSnapshot().status !== "paused"
         ? (this.settings.ambientSound || "off")
         : "off",
       () => this.settings.ambientVolume ?? 0.65,
@@ -2228,8 +2284,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
         void this.completeFocusSession();
       },
     });
-    this.session.restore(this.settings.sessionState);
-    this.renderSessionStatus(this.session.getSnapshot());
+    const restored = this.session.restore(this.settings.sessionState);
+    if (restored.status === "idle" && this.settings.sessionState?.status !== "idle") {
+      // The countdown ran out while Obsidian was closed; drop the stale state.
+      this.settings.sessionState = restored;
+      await this.saveSettings();
+    }
+    this.renderSessionStatus(restored);
     this.windowBindings = new Map();
     this.attachWindow(winObj);
     this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, windowObj) => {
@@ -2250,26 +2311,35 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.cursorPatchUninstallers = new Map();
     const tryPatchCursor = () => {
       const activeLeaf = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-      if (!activeLeaf || !activeLeaf.editor || !activeLeaf.editor.cm) return;
+      if (!activeLeaf || !activeLeaf.editor || !activeLeaf.editor.cm) return null;
 
       ensureCursorLayerPatched(
         activeLeaf.editor.cm,
         this,
         this.cursorPatchUninstallers
       );
+      return activeLeaf;
+    };
+    // editor-selection-change fires on every keystroke; keep it to the cheap
+    // patch check. Restyling and re-centring belong to leaf changes, while the
+    // typewriter ViewPlugin already follows typing and cursor moves.
+    const onActiveLeafChange = () => {
+      const activeLeaf = tryPatchCursor();
+      if (!activeLeaf) return;
       this.updateTypewriterStyles();
       if (this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled && activeLeaf.editor.cm.hasFocus) {
         this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "leaf-change");
       }
     };
 
-    this.registerEvent(this.app.workspace.on("active-leaf-change", tryPatchCursor));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", onActiveLeafChange));
     this.registerEvent(this.app.workspace.on("editor-selection-change", tryPatchCursor));
 
-    this.cursorPatchTimer = winObj.setTimeout(tryPatchCursor, 100);
+    this.cursorPatchTimer = winObj.setTimeout(onActiveLeafChange, 100);
 
     // Add Setting Tab
-    this.addSettingTab(new CrispFocusSettingTab(this.app, this));
+    this.settingTab = new CrispFocusSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     // Commands
     this.addCommand({
@@ -2277,7 +2347,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       name: "Toggle focus mode",
       callback: async () => {
         await this.setFocusModeEnabled(!this.settings.focusModeEnabled);
-        new obsidian.Notice(`Focus mode ${this.settings.focusModeEnabled ? "enabled" : "disabled"}`);
+        new obsidian.Notice(`Crisp Focus 专注模式已${this.settings.focusModeEnabled ? "开启" : "关闭"}`);
       }
     });
 
@@ -2286,7 +2356,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       name: "Toggle animated cursor",
       callback: async () => {
         await this.setAnimatedCursorEnabled(!this.settings.animatedCursorEnabled);
-        new obsidian.Notice(`Crisp Focus cursor ${this.settings.animatedCursorEnabled ? "enabled" : "disabled"}`);
+        new obsidian.Notice(`Crisp Focus 动效光标已${this.settings.animatedCursorEnabled ? "开启" : "关闭"}`);
       }
     });
 
@@ -2352,14 +2422,23 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.addCommand({
       id: "pause-resume-focus-session",
       name: "Pause or resume focus session",
-      callback: () => this.session.getSnapshot().status === "running"
-        ? this.pauseFocusSession()
-        : this.resumeFocusSession(),
+      callback: () => {
+        const status = this.session.getSnapshot().status;
+        if (status === "running") return this.pauseFocusSession();
+        if (status === "paused") return this.resumeFocusSession();
+        new obsidian.Notice("当前没有进行中的专注会话");
+      },
     });
     this.addCommand({
       id: "stop-focus-session",
       name: "Stop focus session",
-      callback: () => this.stopFocusSession(),
+      callback: () => {
+        if (this.session.getSnapshot().status === "idle") {
+          new obsidian.Notice("当前没有进行中的专注会话");
+          return;
+        }
+        return this.stopFocusSession();
+      },
     });
   }
 
@@ -2393,7 +2472,64 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async saveSettings() {
+    // A damaged data.json we could not back up must never be overwritten.
+    if (this.settingsWriteBlocked) return;
     await this.saveData(this.settings);
+  }
+
+  getDataFilePath() {
+    const configDir = this.app?.vault?.configDir || ".obsidian";
+    const dir = this.manifest?.dir || `${configDir}/plugins/crisp-focus`;
+    return `${dir}/data.json`;
+  }
+
+  // Obsidian's loadData() returns null for a missing file and undefined for a file
+  // it could not read or parse. Treating the latter as a fresh install would
+  // overwrite the damaged file (and the license code in it) on the next save.
+  async loadSavedSettings() {
+    const raw = await this.loadData();
+    if (raw === null) return {};
+    if (raw !== undefined && typeof raw === "object" && !Array.isArray(raw)) return raw;
+
+    const adapter = this.app?.vault?.adapter;
+    const dataPath = this.getDataFilePath();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
+    const backupPath = `${dataPath}.corrupt-${stamp}`;
+    let preserved = false;
+    try {
+      if (adapter && typeof adapter.exists === "function" && !(await adapter.exists(dataPath))) {
+        return {};
+      }
+      if (adapter && typeof adapter.copy === "function") {
+        try {
+          await adapter.copy(dataPath, backupPath);
+          preserved = true;
+        } catch (copyError) {
+          // Fall back to read + write below.
+        }
+      }
+      if (!preserved && adapter && typeof adapter.read === "function" && typeof adapter.write === "function") {
+        await adapter.write(backupPath, await adapter.read(dataPath));
+        preserved = true;
+      }
+    } catch (error) {
+      console.error("[Crisp Focus] Could not back up damaged data.json", error);
+    }
+
+    if (preserved) {
+      console.warn(`[Crisp Focus] data.json was unreadable; backed up to ${backupPath}`);
+      new obsidian.Notice(
+        `Crisp Focus 设置文件已损坏，已备份为 ${backupPath.split("/").pop()} 并恢复默认设置。如需继续使用付费音效，请重新输入授权码。`,
+        12000
+      );
+    } else {
+      this.settingsWriteBlocked = true;
+      new obsidian.Notice(
+        "Crisp Focus 无法读取设置文件，也无法备份它。本次使用默认设置运行，且不会写入 data.json，以免覆盖原文件。",
+        12000
+      );
+    }
+    return {};
   }
 
   async refreshLicense() {
@@ -2455,6 +2591,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   onSessionUpdate(snapshot, reason) {
     this.settings.sessionState = snapshot;
     this.renderSessionStatus(snapshot);
+    this.settingTab?.onSessionUpdate?.(snapshot, reason);
     if (reason !== "tick") {
       void this.saveSettings();
     }
@@ -2505,6 +2642,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async stopFocusSession() {
+    if (this.session.getSnapshot().status === "idle") {
+      return this.session.getSnapshot();
+    }
     const snapshot = this.session.stop();
     await this.setFocusModeEnabled(false);
     await this.saveSettings();

@@ -1743,3 +1743,199 @@ test('IME commit followed by insertText does not play a second sound', async () 
     assert.equal(count, 1);
   } finally { plugin.onunload(); }
 });
+
+// ---- 1.4.5 regressions -------------------------------------------------------
+
+test('a paused session keeps ambient audio silent through later typing and clicks', async () => {
+  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ ambientSound: 'rain', typewriterAudioEnabled: true });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    await plugin.startFocusSession(25);
+    await plugin.pauseFocusSession();
+    windowObject.dispatch('keydown', { altKey: false, ctrlKey: false, metaKey: false, key: 'a' });
+    windowObject.dispatch('pointerdown', {});
+    assert.equal(audioElements.filter((el) => !el.paused).length, 0, 'ambient must stay stopped while paused');
+    await plugin.resumeFocusSession();
+    assert.equal(audioElements.filter((el) => !el.paused).length, 1, 'resume brings ambient back');
+  } finally { plugin.onunload(); }
+});
+
+test('stopping without an active session leaves Focus mode untouched', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ focusModeEnabled: true });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    await plugin.stopFocusSession();
+    assert.equal(plugin.settings.focusModeEnabled, true);
+  } finally { plugin.onunload(); }
+});
+
+test('a session that expired while Obsidian was closed is cleared from saved state', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  let saved = null;
+  plugin.loadData = async () => ({ sessionState: { status: 'running', endAt: 1, remainingMs: 50_000 } });
+  plugin.saveData = async (data) => { saved = JSON.parse(JSON.stringify(data)); };
+  await plugin.onload();
+  try {
+    assert.equal(plugin.settings.sessionState.status, 'idle');
+    assert.equal(saved?.sessionState?.status, 'idle', 'the stale running state must be persisted as idle');
+  } finally { plugin.onunload(); }
+});
+
+test('pointer-driven selections do not scroll the typewriter viewport under the mouse', () => {
+  const codemirrorView = { ViewPlugin: { fromClass: (C) => C } };
+  const { createTypewriterExtension } = loadPluginInternals({ codemirrorView });
+  const windowObject = { cancelAnimationFrame() {}, requestAnimationFrame(cb) { cb(); return 1; } };
+  let scrolls = 0;
+  const plugin = {
+    mainWindow: windowObject,
+    settings: { focusModeEnabled: true, typewriterScrollEnabled: true, typewriterScrollOffset: 42 },
+    typewriterEngine: { onUserActivity() {}, onUserScroll() {}, requestScroll() { scrolls += 1; } },
+  };
+  const view = {
+    dom: { classList: createClassList(), closest: () => null, ownerDocument: { defaultView: windowObject }, querySelector: () => null, style: createStyle() },
+    scrollDOM: { addEventListener() {}, removeEventListener() {} },
+  };
+  const ViewPluginClass = createTypewriterExtension(plugin);
+  const instance = new ViewPluginClass(view);
+  const tr = (event) => ({ isUserEvent: (name) => name === event || event.startsWith(`${name}.`) });
+
+  instance.update({ view, docChanged: false, selectionSet: true, transactions: [tr('select.pointer')] });
+  assert.equal(scrolls, 0, 'mouse click / drag must not move the page');
+  instance.update({ view, docChanged: false, selectionSet: true, transactions: [tr('select')] });
+  assert.equal(scrolls, 1, 'keyboard cursor moves still re-centre');
+  instance.update({ view, docChanged: true, selectionSet: true, transactions: [tr('input.type')] });
+  assert.equal(scrolls, 2, 'typing re-centres');
+  instance.destroy();
+});
+
+test('cursor selection changes do not restyle every editor on each keystroke', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({});
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    const cm = { plugins: [], hasFocus: true };
+    plugin.app.workspace.getActiveViewOfType = () => ({ editor: { cm } });
+    let restyles = 0;
+    plugin.updateTypewriterStyles = () => { restyles += 1; };
+    plugin.app.workspace.emit('editor-selection-change');
+    plugin.app.workspace.emit('editor-selection-change');
+    assert.equal(restyles, 0);
+    plugin.app.workspace.emit('active-leaf-change');
+    assert.equal(restyles, 1);
+  } finally { plugin.onunload(); }
+});
+
+function createDataFileApp(windowObject, files, { failCopy = false, failWrite = false } = {}) {
+  const app = createPluginApp(windowObject);
+  const writes = [];
+  app.vault.adapter = {
+    ...app.vault.adapter,
+    async exists(p) { return files.has(p); },
+    async read(p) {
+      if (!files.has(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return files.get(p);
+    },
+    async copy(from, to) {
+      if (failCopy) throw new Error('EACCES');
+      files.set(to, files.get(from));
+    },
+    async write(p, text) {
+      if (failWrite) throw new Error('EACCES');
+      writes.push(p);
+      files.set(p, text);
+    },
+  };
+  return { app, writes };
+}
+
+const DATA_PATH = '.obsidian/plugins/crisp-focus/data.json';
+
+test('a damaged data.json is backed up byte-for-byte before defaults are used', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const damaged = '{"licenseCode":"abc.def","typewriterAudioEnabled":tr';
+  const files = new Map([[DATA_PATH, damaged]]);
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files).app;
+  plugin.loadData = async () => undefined; // Obsidian's readJson result for an unreadable file
+  let saves = 0;
+  plugin.saveData = async () => { saves += 1; };
+  await plugin.onload();
+  try {
+    const backups = [...files.keys()].filter((p) => p.startsWith(`${DATA_PATH}.corrupt-`));
+    assert.equal(backups.length, 1, 'one backup of the damaged file');
+    assert.equal(files.get(backups[0]), damaged, 'backup keeps the original bytes');
+    assert.equal(plugin.settingsWriteBlocked, false);
+    await plugin.saveSettings();
+    assert.ok(saves > 0, 'once the damaged file is preserved, settings can be saved again');
+  } finally { plugin.onunload(); }
+});
+
+test('if the damaged data.json cannot be backed up, the plugin never overwrites it', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const damaged = '{"licenseCode":"abc.def",';
+  const files = new Map([[DATA_PATH, damaged]]);
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files, { failCopy: true, failWrite: true }).app;
+  plugin.loadData = async () => undefined;
+  let saves = 0;
+  plugin.saveData = async () => { saves += 1; };
+  await plugin.onload();
+  try {
+    assert.equal(plugin.settingsWriteBlocked, true);
+    await plugin.setFocusModeEnabled(false);
+    await plugin.saveSettings();
+    assert.equal(saves, 0, 'no write may reach data.json');
+    assert.equal(files.get(DATA_PATH), damaged);
+  } finally { plugin.onunload(); }
+});
+
+test('a missing data.json is a normal first install without backups', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const files = new Map();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files).app;
+  plugin.loadData = async () => null;
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    assert.equal(plugin.settingsWriteBlocked, false);
+    assert.equal(files.size, 0);
+    assert.equal(plugin.settings.activeSceneId, 'silent-writing');
+  } finally { plugin.onunload(); }
+});
+
+test('non-object data.json content is treated as damaged, not as settings', async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const files = new Map([[DATA_PATH, '"oops"']]);
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files).app;
+  plugin.loadData = async () => 'oops';
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    assert.equal([...files.keys()].filter((p) => p.includes('.corrupt-')).length, 1);
+    assert.equal(plugin.settings.focusModeEnabled, true);
+  } finally { plugin.onunload(); }
+});

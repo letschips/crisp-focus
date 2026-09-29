@@ -9,7 +9,7 @@ ambient soundscapes to Obsidian.
 - Four atomic Focus scenes for silent, typewriter, rainy, and ocean writing.
 - Restorable 1–240 minute focus sessions with pause, resume, and status-bar controls.
 - Dual-mode typewriter scrolling with adjustable eye-line height, a soft tolerance band, and viewport-aware end padding.
-- Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes.
+- Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes; mouse clicks and drag selections never move the page.
 - Adjustable animated cursor with reduced-motion support.
 - Five synthesized typing themes with a shared output limiter.
 - Independent space/IME confirmation and Enter bell switches. The space preference survives scene changes.
@@ -30,7 +30,7 @@ individual scene-controlled setting marks the setup as `Custom`.
 
 Start a custom-duration session from settings, use the 25/50-minute command
 palette shortcuts, or click the `Focus` status-bar item. The status bar shows
-the remaining time and toggles pause/resume. Session state is stored in the
+the remaining time and toggles pause/resume; ambient sound stays silent while a session is paused. Session state is stored in the
 current vault so an unfinished countdown survives plugin reloads. Completing
 or stopping a session turns Focus mode off and stops ambient audio.
 
@@ -40,11 +40,15 @@ The animated cursor is available without activation. Typing feedback and
 ambient soundscapes require a valid Crisp license. License signatures are
 validated locally first. The plugin then sends the license code, the current
 Obsidian app/device identifier, and the plugin ID to the Crisp license service
-to register or verify the device. If the service is temporarily unreachable,
-a previously verified license receives a seven-day offline grace period.
+to register or verify the device. If the service is unreachable, a license
+with a valid local signature keeps working offline; an explicit rejection from
+the service (revoked, device limit reached) disables paid audio.
 
 The license code is stored only in the current vault's plugin `data.json`.
 Keep that file private and exclude it from shared archives.
+If `data.json` becomes unreadable (for example after an interrupted sync), the
+plugin copies it to `data.json.corrupt-<timestamp>` before falling back to
+defaults, and never overwrites it when that copy cannot be made.
 
 ## Development
 

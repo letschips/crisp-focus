@@ -5,3 +5,4 @@ data.json
 .idea/
 .vscode/
 dist/
+data.json.corrupt-*
