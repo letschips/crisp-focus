@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "check": "node --check main.js && npm test",
+    "deploy": "node scripts/deploy.mjs",
     "test": "node --test tests/regression.test.js && node --test tests/license-http.cjs"
   },
   "license": "SEE LICENSE IN LICENSE"
