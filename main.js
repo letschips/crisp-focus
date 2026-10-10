@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.5)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.5.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -589,6 +589,30 @@ class CrispFocusAudioEngine {
   }
 
   // 1.4 Enter / Return
+  /* 番茄钟阶段提示音：像轻敲一下小碗。专注结束是上行的两声，休息结束是下行的两声。
+     不受打字音效开关影响，由番茄钟自己的「阶段提示音」控制。 */
+  playChime(kind = "focus-end") {
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const notes = kind === "break-end" ? [[783.99, 0], [587.33, 0.2]] : [[587.33, 0], [880, 0.2]];
+    for (const [freq, delay] of notes) {
+      for (const [ratio, level] of [[1, 0.2], [2.76, 0.05], [5.4, 0.018]]) {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq * ratio, now + delay);
+        gain.gain.setValueAtTime(0.0001, now + delay);
+        gain.gain.exponentialRampToValueAtTime(level, now + delay + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + (ratio === 1 ? 1.6 : 0.6));
+        osc.connect(gain);
+        this.connectOutput(gain);
+        osc.start(now + delay);
+        osc.stop(now + delay + 1.7);
+      }
+    }
+  }
+
   playEnterKey() {
     if (!this.getEnabled()) return;
     this.unlock();
@@ -1578,6 +1602,165 @@ function formatSessionRemaining(remainingMs) {
   return `${minutes}:${seconds}`;
 }
 
+// 番茄钟：专注 → 短休，每 N 个专注后换成长休。专注阶段沿用专注会话的计时与环境音，休息阶段关掉专注效果。
+const FOCUS_API_VERSION = 1;
+const POMODORO_PHASE_LABELS = Object.freeze({ focus: "专注", "short-break": "短休", "long-break": "长休" });
+
+function clampMinutes(value, fallback, max = 240) {
+  return Math.max(1, Math.min(max, Math.round(Number(value) || fallback)));
+}
+
+function pomodoroPhaseMinutes(settings, phase) {
+  if (phase === "short-break") return clampMinutes(settings.pomodoroShortBreakMinutes, 5, 60);
+  if (phase === "long-break") return clampMinutes(settings.pomodoroLongBreakMinutes, 15, 90);
+  return clampMinutes(settings.pomodoroFocusMinutes, 25);
+}
+
+/** 完成第 completedRounds 个专注后接哪种休息。 */
+function nextPomodoroBreak(completedRounds, every) {
+  const n = Math.max(2, Math.min(12, Math.round(Number(every) || 4)));
+  return completedRounds > 0 && completedRounds % n === 0 ? "long-break" : "short-break";
+}
+
+function localDateKey(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function newSessionId() {
+  const c = typeof crypto !== "undefined" ? crypto : null;
+  return c && typeof c.randomUUID === "function" ? c.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function clockTime(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/* 番茄钟面板显示什么：由 getPomodoroSnapshot() 推出来，渲染只照着画。
+   state: locked | idle | single | focus | break | waiting；actions 的 id 对应面板按钮。 */
+function pomodoroViewModel(snap, now = Date.now()) {
+  const every = snap.every || 4;
+  const paused = snap.status === "paused";
+  const running = snap.status !== "idle";
+  const progress = snap.plannedMs > 0 ? Math.max(0, Math.min(1, 1 - snap.remainingMs / snap.plannedMs)) : 0;
+  const endsAt = running && !paused ? `${clockTime(now + snap.remainingMs)} 结束` : "";
+  // 番茄位只显示这一组（每 every 个一组）里的位置
+  const doneInSet = snap.completedRounds % every === 0 && snap.completedRounds > 0 && snap.kind === "break" ? every : snap.completedRounds % every;
+  const slots = (current, p = 0) => Array.from({ length: every }, (_, i) => ({ state: i < doneInSet ? "done" : i === current ? "current" : "next", p: i === current ? p : 0 }));
+  const foot = { count: snap.todayCount, goal: snap.goal, minutes: snap.todayFocusMinutes };
+  const time = formatSessionRemaining(snap.remainingMs);
+  const plan = `专注 ${snap.focusMinutes} 分钟 · 短休 ${snap.shortBreakMinutes} · 每 ${every} 个长休 ${snap.longBreakMinutes}`;
+
+  if (running && !snap.pomodoro) {
+    return { state: "single", tone: "focus", paused, pill: paused ? "已暂停" : "单次专注", meta: "", time, sub: paused ? "暂停中，回来接着写" : endsAt, progress, slots: [], foot,
+      actions: [paused ? { id: "resume", label: "继续", primary: true } : { id: "pause", label: "暂停", primary: true }, { id: "stop", label: "结束" }] };
+  }
+  if (!snap.entitled && !snap.active) {
+    return { state: "locked", tone: "focus", pill: "番茄钟", meta: "需要激活", time: formatSessionRemaining(snap.focusMinutes * 60000), sub: "激活后可用 · 单次专注免费", progress: 0,
+      slots: Array.from({ length: every }, () => ({ state: "next", p: 0 })), foot: null,
+      actions: [{ id: "activate", label: "前往激活", primary: true }, { id: "single", label: "单次专注" }] };
+  }
+  if (snap.kind === "focus" && running) {
+    const index = (snap.round - 1) % every;
+    return { state: "focus", tone: "focus", paused, pill: paused ? "已暂停" : "专注", meta: `第 ${index + 1} / ${every} 个`, time,
+      sub: paused ? "暂停中，回来接着写" : endsAt, progress, slots: slots(index, progress), foot,
+      actions: [paused ? { id: "resume", label: "继续", primary: true } : { id: "pause", label: "暂停", primary: true }, { id: "end", label: "结束" }] };
+  }
+  if (snap.kind === "break" && running) {
+    const long = snap.phase === "long-break";
+    return { state: "break", tone: "break", paused, pill: paused ? "休息暂停" : long ? "长休" : "短休", meta: `已完成 ${snap.completedRounds} 个`, time,
+      sub: paused ? "休息也暂停了" : long ? "离开屏幕，喝点水" : "站起来走走，看看远处", progress, slots: slots(-1), foot,
+      actions: [paused ? { id: "resume", label: "继续", primary: true } : null, { id: "skip", label: "跳过休息" }, { id: "end", label: "结束本轮" }].filter(Boolean) };
+  }
+  if (snap.waiting) {
+    return { state: "waiting", tone: "focus", pill: "休息结束", meta: `第 ${(snap.completedRounds % every) + 1} / ${every} 个`, time: formatSessionRemaining(snap.focusMinutes * 60000),
+      sub: "准备好就开始下一个", progress: 0, slots: slots(-1), foot,
+      actions: [{ id: "next", label: "开始下一个", primary: true }, { id: "end", label: "结束本轮" }] };
+  }
+  return { state: "idle", tone: "focus", pill: "番茄钟", meta: `${every} 个一组`, time: formatSessionRemaining(snap.focusMinutes * 60000), sub: plan, progress: 0,
+    slots: Array.from({ length: every }, () => ({ state: "next", p: 0 })), foot,
+    actions: [{ id: "start", label: "开始番茄", primary: true }, { id: "single", label: "单次专注" }] };
+}
+
+/* 番茄钟面板：桌面端从状态栏弹出，手机端和命令面板用对话框。每秒只更新数字、进度和当前番茄位；
+   状态或按钮变了才重建。 */
+class PomodoroPanelView {
+  constructor(plugin, host) {
+    this.plugin = plugin;
+    this.host = host;
+    this.signature = null;
+    this.root = host.createDiv({ cls: "crisp-focus-pomo" });
+    this.update();
+  }
+
+  update() {
+    if (!this.root?.isConnected) return;
+    const snap = this.plugin.getPomodoroSnapshot();
+    const vm = pomodoroViewModel(snap);
+    const signature = JSON.stringify([vm.state, vm.tone, !!vm.paused, vm.pill, vm.meta, vm.slots.map((x) => x.state), vm.actions.map((a) => a.id), vm.foot && [vm.foot.count, vm.foot.goal, vm.foot.minutes]]);
+    if (signature !== this.signature) {
+      this.signature = signature;
+      this.build(vm);
+    }
+    this.timeEl.setText(vm.time);
+    this.subEl.setText(vm.sub);
+    this.barEl.style.width = `${(vm.progress * 100).toFixed(2)}%`;
+    vm.slots.forEach((slot, i) => this.slotEls[i]?.style.setProperty("--p", String(slot.p)));
+  }
+
+  build(vm) {
+    const root = this.root;
+    root.empty();
+    root.dataset.state = vm.state;
+    root.dataset.tone = vm.tone;
+    root.toggleClass("is-paused", !!vm.paused);
+    this.barEl = root.createDiv({ cls: "crisp-focus-pomo__bar" }).createDiv({ cls: "crisp-focus-pomo__bar-fill" });
+    const head = root.createDiv({ cls: "crisp-focus-pomo__head" });
+    head.createSpan({ cls: "crisp-focus-pomo__pill", text: vm.pill });
+    if (vm.meta) head.createSpan({ cls: "crisp-focus-pomo__meta", text: vm.meta });
+    this.timeEl = root.createDiv({ cls: "crisp-focus-pomo__time", attr: { role: "timer", "aria-live": "off" } });
+    this.subEl = root.createDiv({ cls: "crisp-focus-pomo__sub" });
+    const slots = root.createDiv({ cls: "crisp-focus-pomo__slots", attr: { "aria-hidden": "true" } });
+    this.slotEls = vm.slots.map((slot) => slots.createSpan({ cls: `crisp-focus-pomo__slot is-${slot.state}` }));
+    if (!vm.slots.length) slots.addClass("is-empty");
+    const actions = root.createDiv({ cls: "crisp-focus-pomo__actions" });
+    for (const action of vm.actions) {
+      const button = actions.createEl("button", { cls: `crisp-focus-pomo__btn${action.primary ? " is-primary" : ""}`, text: action.label, attr: { type: "button" } });
+      button.addEventListener("click", () => { void this.run(action.id); });
+    }
+    if (vm.foot) {
+      const foot = root.createDiv({ cls: "crisp-focus-pomo__foot" });
+      const left = foot.createSpan({ cls: "crisp-focus-pomo__today" });
+      left.createSpan({ cls: "crisp-focus-pomo__count", text: String(vm.foot.count) });
+      left.appendText(` / ${vm.foot.goal} 个番茄`);
+      foot.createSpan({ text: vm.foot.minutes ? `今天专注 ${vm.foot.minutes} 分钟` : "今天还没开始" });
+    }
+  }
+
+  async run(id) {
+    const p = this.plugin;
+    const actions = {
+      start: () => p.startPomodoro(),
+      single: () => p.startFocusSession(p.settings.sessionDurationMinutes),
+      pause: () => p.pauseFocusSession(),
+      resume: () => p.resumeFocusSession(),
+      stop: () => p.stopFocusSession(),
+      end: () => p.endPomodoro(),
+      skip: () => p.skipPomodoroBreak(),
+      next: () => p.startNextPomodoro(),
+      activate: () => { p.closePomodoroPanel(); p.openSettings(); },
+    };
+    try { await actions[id]?.(); } catch (error) { new obsidian.Notice(`Crisp Focus：${error.message || error}`); }
+    this.update();
+  }
+
+  destroy() {
+    this.root?.remove();
+    this.root = null;
+  }
+}
+
 const DEFAULT_SETTINGS = {
   activeSceneId: "silent-writing",
   focusModeEnabled: true,
@@ -1601,7 +1784,19 @@ const DEFAULT_SETTINGS = {
   licenseCode: "",
   licenseLastOnlineAt: 0,
   sessionDurationMinutes: 25,
-  sessionState: { status: "idle", endAt: 0, remainingMs: 0 }
+  sessionState: { status: "idle", endAt: 0, remainingMs: 0 },
+  // 当前计时的身份：单次专注或番茄钟的某个阶段；结束后清空
+  sessionMeta: null,
+  // 番茄循环：active 表示在循环里，round 是本轮已完成的专注个数，waiting 表示休息结束、等用户开始下一个
+  pomodoroState: null,
+  pomodoroFocusMinutes: 25,
+  pomodoroShortBreakMinutes: 5,
+  pomodoroLongBreakMinutes: 15,
+  pomodoroLongBreakEvery: 4,
+  pomodoroAutoStartFocus: false,
+  pomodoroChime: true,
+  pomodoroDailyGoal: 8,
+  pomodoroToday: { date: "", count: 0, focusMinutes: 0 }
 };
 
 function renderAboutCard(container, pluginName, description) {
@@ -1806,6 +2001,52 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           await this.plugin.stopFocusSession();
           this.display();
         }));
+
+    const pomodoroGroup = createGroup(
+      "番茄钟",
+      this.plugin.licenseManager.isEntitled()
+        ? "专注与休息交替，点状态栏或用命令「Open pomodoro timer」打开。"
+        : "需要激活 Crisp Focus。激活后点状态栏或用命令打开。",
+      true
+    );
+    const numberSetting = (name, desc, key, fallback, min, max) => new obsidian.Setting(pomodoroGroup)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = String(min);
+        text.inputEl.max = String(max);
+        text.setValue(String(this.plugin.settings[key] ?? fallback)).onChange(async (value) => {
+          if (String(value).trim() === "") return;
+          this.plugin.settings[key] = Math.max(min, Math.min(max, Math.round(Number(value) || fallback)));
+          await this.plugin.saveSettings();
+          this.plugin.pomodoroView?.update();
+        });
+        text.inputEl.addEventListener("blur", () => text.setValue(String(this.plugin.settings[key] ?? fallback)));
+      });
+    numberSetting("专注时长", "每个番茄的专注分钟数，1–240。", "pomodoroFocusMinutes", 25, 1, 240);
+    numberSetting("短休", "每个番茄之后的休息分钟数，1–60。", "pomodoroShortBreakMinutes", 5, 1, 60);
+    numberSetting("长休", "每组番茄之后的休息分钟数，1–90。", "pomodoroLongBreakMinutes", 15, 1, 90);
+    numberSetting("每组几个", "完成几个番茄后换成长休，2–12。", "pomodoroLongBreakEvery", 4, 2, 12);
+    numberSetting("每日目标", "面板底部显示今天完成了几个，1–24。", "pomodoroDailyGoal", 8, 1, 24);
+    new obsidian.Setting(pomodoroGroup)
+      .setName("休息结束自动开始下一个")
+      .setDesc("关闭时，休息结束后等你点「开始下一个」。")
+      .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.pomodoroAutoStartFocus).onChange(async (value) => {
+        this.plugin.settings.pomodoroAutoStartFocus = value;
+        await this.plugin.saveSettings();
+      }));
+    new obsidian.Setting(pomodoroGroup)
+      .setName("阶段提示音")
+      .setDesc("专注结束和休息结束时轻响两声，不受打字音效开关影响。")
+      .addButton((button) => button.setButtonText("试听").onClick(() => this.plugin.audio?.playChime("focus-end")))
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.pomodoroChime !== false).onChange(async (value) => {
+        this.plugin.settings.pomodoroChime = value;
+        await this.plugin.saveSettings();
+      }));
+    new obsidian.Setting(pomodoroGroup)
+      .setName("打开番茄钟")
+      .addButton((button) => button.setButtonText("打开").setCta().onClick(() => this.plugin.openPomodoroModal()));
 
     const licenseGroup = createGroup(
       "软件授权",
@@ -2265,30 +2506,29 @@ class CrispFocusPlugin extends obsidian.Plugin {
     );
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.classList.add("crisp-focus-session-status");
-    this.statusBarEl.setAttr("aria-label", "Crisp Focus 专注会话");
-    this.statusBarEl.addEventListener("click", () => {
-      const status = this.session.getSnapshot().status;
-      if (status === "running") {
-        void this.pauseFocusSession();
-      } else if (status === "paused") {
-        void this.resumeFocusSession();
-      } else {
-        void this.startFocusSession(this.settings.sessionDurationMinutes);
-      }
-    });
+    this.statusBarEl.setAttr("aria-label", "Crisp Focus 番茄钟与专注会话");
+    // 点状态栏打开番茄钟面板；开始、暂停、跳过休息和结束都在面板里
+    this.statusBarEl.addEventListener("click", () => this.togglePomodoroPanel());
+    this.focusApiVersion = FOCUS_API_VERSION;
     this.session = new FocusSessionController({
       setInterval: (callback, delay) => winObj.setInterval(callback, delay),
       clearInterval: (timer) => winObj.clearInterval(timer),
       onUpdate: (snapshot, reason) => this.onSessionUpdate(snapshot, reason),
       onComplete: () => {
-        void this.completeFocusSession();
+        void this.handleSessionComplete();
       },
     });
     const restored = this.session.restore(this.settings.sessionState);
     if (restored.status === "idle" && this.settings.sessionState?.status !== "idle") {
       // The countdown ran out while Obsidian was closed; drop the stale state.
+      // 关着 Obsidian 时跑完的番茄不算完成，这一轮循环也随之结束。
       this.settings.sessionState = restored;
+      this.settings.sessionMeta = null;
+      this.settings.pomodoroState = null;
       await this.saveSettings();
+    } else if (restored.status === "idle" && !this.settings.pomodoroState?.waiting) {
+      this.settings.sessionMeta = null;
+      if (this.settings.pomodoroState) this.settings.pomodoroState = null;
     }
     this.renderSessionStatus(restored);
     this.windowBindings = new Map();
@@ -2410,6 +2650,28 @@ class CrispFocusPlugin extends obsidian.Plugin {
     });
 
     this.addCommand({
+      id: "open-pomodoro",
+      name: "Open pomodoro timer",
+      callback: () => this.openPomodoroModal(),
+    });
+    this.addCommand({
+      id: "start-pomodoro",
+      name: "Start pomodoro",
+      callback: () => this.startPomodoro(),
+    });
+    this.addCommand({
+      id: "skip-pomodoro-break",
+      name: "Skip pomodoro break",
+      callback: () => {
+        if (this.settings.sessionMeta?.kind !== "break") {
+          new obsidian.Notice("现在不是番茄钟的休息时间");
+          return;
+        }
+        return this.skipPomodoroBreak();
+      },
+    });
+
+    this.addCommand({
       id: "start-focus-session-25",
       name: "Start 25-minute focus session",
       callback: () => this.startFocusSession(25),
@@ -2469,6 +2731,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (this.session) {
       this.session.destroy();
     }
+    this.closePomodoroPanel?.();
   }
 
   async saveSettings() {
@@ -2591,6 +2854,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   onSessionUpdate(snapshot, reason) {
     this.settings.sessionState = snapshot;
     this.renderSessionStatus(snapshot);
+    this.pomodoroView?.update();
     this.settingTab?.onSessionUpdate?.(snapshot, reason);
     if (reason !== "tick") {
       void this.saveSettings();
@@ -2599,33 +2863,292 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   renderSessionStatus(snapshot) {
     if (!this.statusBarEl) return;
+    const meta = this.settings.sessionMeta;
+    const pomodoro = this.settings.pomodoroState?.active ? this.settings.pomodoroState : null;
+    const isBreak = meta?.kind === "break";
     this.statusBarEl.classList.toggle("is-running", snapshot.status === "running");
     this.statusBarEl.classList.toggle("is-paused", snapshot.status === "paused");
+    this.statusBarEl.classList.toggle("is-break", isBreak && snapshot.status !== "idle");
+    this.statusBarEl.classList.toggle("is-pomodoro", !!pomodoro);
+    this.statusBarEl.classList.toggle("is-waiting", !!pomodoro?.waiting && snapshot.status === "idle");
+    const time = formatSessionRemaining(snapshot.remainingMs);
+    const round = meta?.pomodoro && meta.kind === "focus" ? ` · ${meta.round}/${this.pomodoroEvery()}` : "";
     if (snapshot.status === "running") {
-      this.statusBarEl.setText(`专注 ${formatSessionRemaining(snapshot.remainingMs)}`);
-      this.statusBarEl.title = "点击暂停专注会话";
+      this.statusBarEl.setText(isBreak ? `${POMODORO_PHASE_LABELS[meta.phase]} ${time}` : `专注 ${time}${round}`);
     } else if (snapshot.status === "paused") {
-      this.statusBarEl.setText(`专注 暂停 ${formatSessionRemaining(snapshot.remainingMs)}`);
-      this.statusBarEl.title = "点击继续专注会话";
+      this.statusBarEl.setText(isBreak ? `${POMODORO_PHASE_LABELS[meta.phase]} 暂停 ${time}` : `专注 暂停 ${time}${round}`);
+    } else if (pomodoro?.waiting) {
+      this.statusBarEl.setText(`下一个番茄 · ${pomodoro.round + 1}/${this.pomodoroEvery()}`);
     } else {
       this.statusBarEl.setText("专注");
-      this.statusBarEl.title = `点击开始 ${this.settings.sessionDurationMinutes} 分钟专注会话`;
+    }
+    this.statusBarEl.title = "打开番茄钟";
+  }
+
+  /** 状态栏上方弹出的番茄钟面板；再点一次状态栏、点面板外面或按 Esc 关闭。 */
+  togglePomodoroPanel() {
+    if (this.pomodoroPopover) return this.closePomodoroPanel();
+    const anchor = this.statusBarEl;
+    const doc = anchor?.ownerDocument;
+    if (!doc?.body?.createDiv) return this.openPomodoroModal();
+    const win = doc.defaultView || window;
+    const pop = doc.body.createDiv({ cls: "crisp-focus-pomo-popover", attr: { role: "dialog", "aria-label": "番茄钟" } });
+    const view = new PomodoroPanelView(this, pop);
+    const rect = anchor.getBoundingClientRect();
+    pop.style.bottom = `${Math.max(8, win.innerHeight - rect.top + 8)}px`;
+    pop.style.right = `${Math.max(8, win.innerWidth - rect.right)}px`;
+    const onPointer = (event) => {
+      if (pop.contains(event.target) || anchor.contains(event.target)) return;
+      this.closePomodoroPanel();
+    };
+    const onKey = (event) => { if (event.key === "Escape") this.closePomodoroPanel(); };
+    doc.addEventListener("pointerdown", onPointer, true);
+    doc.addEventListener("keydown", onKey, true);
+    this.pomodoroPopover = { pop, view, close: () => {
+      doc.removeEventListener("pointerdown", onPointer, true);
+      doc.removeEventListener("keydown", onKey, true);
+      this.pomodoroViews?.delete(view);
+      view.destroy();
+      pop.remove();
+    } };
+    (this.pomodoroViews ||= new Set()).add(view);
+    anchor.addClass("is-open");
+  }
+
+  closePomodoroPanel() {
+    const popover = this.pomodoroPopover;
+    if (!popover) return;
+    this.pomodoroPopover = null;
+    this.statusBarEl?.removeClass?.("is-open");
+    popover.close();
+  }
+
+  /** 命令面板和手机端：用对话框打开同一个面板。 */
+  openPomodoroModal() {
+    const Modal = obsidian.Modal;
+    if (typeof Modal !== "function") return;
+    const modal = new Modal(this.app);
+    let view = null;
+    modal.onOpen = () => {
+      modal.modalEl.addClass("crisp-focus-pomo-modal");
+      view = new PomodoroPanelView(this, modal.contentEl);
+      (this.pomodoroViews ||= new Set()).add(view);
+    };
+    modal.onClose = () => {
+      this.pomodoroViews?.delete(view);
+      view?.destroy();
+      modal.contentEl.empty();
+    };
+    modal.open();
+  }
+
+  get pomodoroView() {
+    const views = this.pomodoroViews;
+    if (!views?.size) return null;
+    return { update: () => views.forEach((view) => view.update()) };
+  }
+
+  openSettings() {
+    const setting = this.app?.setting;
+    if (setting?.open) {
+      setting.open();
+      setting.openTabById?.(this.manifest?.id || "crisp-focus");
     }
   }
 
-  async startFocusSession(minutes = this.settings.sessionDurationMinutes) {
+  pomodoroEvery() {
+    return Math.max(2, Math.min(12, Math.round(Number(this.settings.pomodoroLongBreakEvery) || 4)));
+  }
+
+  activeNotePath() {
+    try { return this.app?.workspace?.getActiveFile?.()?.path || null; } catch { return null; }
+  }
+
+  /** 这一段已经专注了多久（暂停的时间不算）。 */
+  elapsedMs() {
+    const meta = this.settings.sessionMeta;
+    const snap = this.session.getSnapshot();
+    if (!meta || snap.status === "idle") return 0;
+    const remaining = snap.status === "running" ? Math.max(0, snap.endAt - Date.now()) : snap.remainingMs;
+    return Math.max(0, meta.plannedMinutes * 60000 - remaining);
+  }
+
+  /* 对外的事件：Crisp Pulse 等插件据此记录每一段专注。
+     type: start | pause | resume | stop | skip | complete；kind: focus | break。 */
+  emitSessionEvent(type, extra = {}) {
+    const meta = this.settings.sessionMeta;
+    if (!meta) return;
+    const payload = {
+      apiVersion: FOCUS_API_VERSION,
+      type,
+      id: meta.id,
+      kind: meta.kind,
+      phase: meta.phase,
+      pomodoro: !!meta.pomodoro,
+      round: meta.round || 0,
+      roundsPerCycle: meta.pomodoro ? this.pomodoroEvery() : 0,
+      plannedMinutes: meta.plannedMinutes,
+      startedAt: meta.startedAt,
+      at: Date.now(),
+      notePath: meta.notePath || null,
+      ...extra,
+    };
+    try {
+      this.app?.workspace?.trigger?.("crisp-focus:session", payload);
+    } catch (error) {
+      console.error("[Crisp Focus] session event listener failed", error);
+    }
+  }
+
+  /** 番茄钟当前状态，供面板和其他插件读取。 */
+  getPomodoroSnapshot() {
+    const snap = this.session.getSnapshot();
+    const meta = this.settings.sessionMeta;
+    const state = this.settings.pomodoroState;
+    const today = this.settings.pomodoroToday?.date === localDateKey() ? this.settings.pomodoroToday : { count: 0, focusMinutes: 0 };
+    const remainingMs = snap.status === "running" ? Math.max(0, snap.endAt - Date.now()) : snap.remainingMs;
+    return {
+      status: snap.status,
+      remainingMs,
+      plannedMs: meta ? meta.plannedMinutes * 60000 : 0,
+      kind: meta?.kind || null,
+      phase: meta?.phase || null,
+      pomodoro: !!meta?.pomodoro || !!state?.active,
+      active: !!state?.active,
+      waiting: !!state?.waiting && snap.status === "idle",
+      round: meta?.round || (state ? state.round + 1 : 0),
+      completedRounds: state?.round || 0,
+      every: this.pomodoroEvery(),
+      focusMinutes: pomodoroPhaseMinutes(this.settings, "focus"),
+      shortBreakMinutes: pomodoroPhaseMinutes(this.settings, "short-break"),
+      longBreakMinutes: pomodoroPhaseMinutes(this.settings, "long-break"),
+      todayCount: today.count || 0,
+      todayFocusMinutes: today.focusMinutes || 0,
+      goal: Math.max(1, Math.min(24, Math.round(Number(this.settings.pomodoroDailyGoal) || 8))),
+      entitled: !!this.licenseManager?.isEntitled(),
+    };
+  }
+
+  /** 番茄钟需要激活；单次专注会话仍然免费。 */
+  async startPomodoro() {
+    if (!this.licenseManager.isEntitled()) {
+      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能，可以先用单次专注会话");
+      return null;
+    }
+    if (this.session.getSnapshot().status !== "idle") await this.stopFocusSession();
+    this.settings.pomodoroState = { active: true, round: 0, cycleId: newSessionId(), waiting: false };
+    return this.startPomodoroPhase("focus");
+  }
+
+  async startPomodoroPhase(phase) {
+    const state = this.settings.pomodoroState;
+    if (!state?.active) return null;
+    const kind = phase === "focus" ? "focus" : "break";
+    const minutes = pomodoroPhaseMinutes(this.settings, phase);
+    state.waiting = false;
+    this.settings.sessionMeta = {
+      id: newSessionId(), kind, phase, pomodoro: true, round: kind === "focus" ? state.round + 1 : state.round,
+      plannedMinutes: minutes, startedAt: Date.now(), notePath: this.activeNotePath(),
+    };
+    if (kind === "focus") return this.startFocusSession(minutes, { pomodoro: true });
+    // 休息：关掉专注效果和环境音，只留倒计时
+    await this.setFocusModeEnabled(false);
+    this.session.start(minutes);
+    await this.saveSettings();
+    this.emitSessionEvent("start");
+    return this.session.getSnapshot();
+  }
+
+  /** 休息结束后开始下一个番茄（不自动开始时由用户点）。 */
+  async startNextPomodoro() {
+    const state = this.settings.pomodoroState;
+    if (!state?.active || this.session.getSnapshot().status !== "idle") return null;
+    if (!this.licenseManager.isEntitled()) {
+      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
+      return null;
+    }
+    return this.startPomodoroPhase("focus");
+  }
+
+  async skipPomodoroBreak() {
+    const meta = this.settings.sessionMeta;
+    if (meta?.kind !== "break" || this.session.getSnapshot().status === "idle") return null;
+    this.emitSessionEvent("skip", { completed: false, elapsedMs: this.elapsedMs() });
+    this.settings.sessionMeta = null;
+    this.session.stop();
+    return this.startPomodoroPhase("focus");
+  }
+
+  /** 结束整轮番茄：正在专注的这一个记为中断（只记录、不计分），休息直接结束。 */
+  async endPomodoro() {
+    if (this.session.getSnapshot().status !== "idle") return this.stopFocusSession();
+    this.settings.pomodoroState = null;
+    this.settings.sessionMeta = null;
+    await this.saveSettings();
+    this.renderSessionStatus(this.session.getSnapshot());
+    this.pomodoroView?.update();
+    return this.session.getSnapshot();
+  }
+
+  async handleSessionComplete() {
+    if (this.settings.sessionMeta?.kind === "break") return this.completePomodoroBreak();
+    return this.completeFocusSession();
+  }
+
+  bumpPomodoroToday(minutes) {
+    const date = localDateKey();
+    const today = this.settings.pomodoroToday?.date === date ? this.settings.pomodoroToday : { date, count: 0, focusMinutes: 0 };
+    this.settings.pomodoroToday = { date, count: (today.count || 0) + 1, focusMinutes: (today.focusMinutes || 0) + minutes };
+  }
+
+  async completePomodoroBreak() {
+    const meta = this.settings.sessionMeta;
+    this.emitSessionEvent("complete", { completed: true, elapsedMs: (meta?.plannedMinutes || 0) * 60000 });
+    this.settings.sessionMeta = null;
+    if (this.settings.pomodoroChime !== false) this.audio?.playChime?.("break-end");
+    const state = this.settings.pomodoroState;
+    if (!state?.active) {
+      await this.saveSettings();
+      return;
+    }
+    if (this.settings.pomodoroAutoStartFocus && this.licenseManager.isEntitled()) {
+      new obsidian.Notice(`休息结束，开始第 ${state.round + 1} 个番茄`);
+      await this.startPomodoroPhase("focus");
+      return;
+    }
+    state.waiting = true;
+    await this.saveSettings();
+    this.renderSessionStatus(this.session.getSnapshot());
+    this.pomodoroView?.update();
+    new obsidian.Notice(`休息结束，准备好就开始第 ${state.round + 1} 个番茄`);
+  }
+
+  async startFocusSession(minutes = this.settings.sessionDurationMinutes, options = {}) {
     const duration = Math.max(1, Math.min(240, Math.round(Number(minutes) || 25)));
-    this.settings.sessionDurationMinutes = duration;
+    if (this.session.getSnapshot().status !== "idle") {
+      // 正在计时又开始新的：前一段记为中断
+      this.emitSessionEvent("stop", { completed: false, elapsedMs: this.elapsedMs() });
+    }
+    if (!options.pomodoro) {
+      this.settings.sessionDurationMinutes = duration;
+      this.settings.pomodoroState = null;
+      this.settings.sessionMeta = {
+        id: newSessionId(), kind: "focus", phase: "focus", pomodoro: false, round: 0,
+        plannedMinutes: duration, startedAt: Date.now(), notePath: this.activeNotePath(),
+      };
+    }
     await this.setFocusModeEnabled(true);
     this.session.start(duration);
     await this.saveSettings();
+    this.emitSessionEvent("start");
     return this.session.getSnapshot();
   }
 
   async pauseFocusSession() {
     const snapshot = this.session.pause();
-    if (snapshot.status === "paused" && this.audio) {
-      this.audio.stopAmbient();
+    if (snapshot.status === "paused") {
+      this.audio?.stopAmbient();
+      this.emitSessionEvent("pause", { elapsedMs: this.elapsedMs() });
     }
     await this.saveSettings();
     return snapshot;
@@ -2634,8 +3157,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
   async resumeFocusSession() {
     const snapshot = this.session.resume();
     if (snapshot.status === "running") {
-      await this.setFocusModeEnabled(true);
+      if (this.settings.sessionMeta?.kind !== "break") await this.setFocusModeEnabled(true);
       this.audio.updateAmbient();
+      this.emitSessionEvent("resume");
     }
     await this.saveSettings();
     return snapshot;
@@ -2645,13 +3169,32 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (this.session.getSnapshot().status === "idle") {
       return this.session.getSnapshot();
     }
+    this.emitSessionEvent("stop", { completed: false, elapsedMs: this.elapsedMs() });
+    this.settings.sessionMeta = null;
+    this.settings.pomodoroState = null;
     const snapshot = this.session.stop();
     await this.setFocusModeEnabled(false);
     await this.saveSettings();
     return snapshot;
   }
 
+  /* 专注（单次或番茄钟的专注阶段）跑完。旧版 Crisp Pulse 会包装这个方法来计入专注分钟，
+     所以休息阶段从不经过这里。 */
   async completeFocusSession() {
+    const meta = this.settings.sessionMeta;
+    if (meta) this.emitSessionEvent("complete", { completed: true, elapsedMs: meta.plannedMinutes * 60000 });
+    const state = this.settings.pomodoroState;
+    if (meta?.pomodoro && state?.active) {
+      state.round += 1;
+      this.bumpPomodoroToday(meta.plannedMinutes);
+      if (this.settings.pomodoroChime !== false) this.audio?.playChime?.("focus-end");
+      const next = nextPomodoroBreak(state.round, this.pomodoroEvery());
+      new obsidian.Notice(`第 ${state.round} 个番茄完成，${POMODORO_PHASE_LABELS[next]} ${pomodoroPhaseMinutes(this.settings, next)} 分钟`);
+      this.settings.sessionMeta = null;
+      await this.startPomodoroPhase(next);
+      return;
+    }
+    this.settings.sessionMeta = null;
     await this.setFocusModeEnabled(false);
     await this.saveSettings();
     new obsidian.Notice("Crisp Focus 专注会话完成");

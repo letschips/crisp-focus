@@ -279,6 +279,8 @@ module.exports.__test = {
   ensureCursorLayerPatched,
   patchCursorLayer,
   renderAboutCard: typeof renderAboutCard === "function" ? renderAboutCard : undefined,
+  pomodoroViewModel: typeof pomodoroViewModel === "function" ? pomodoroViewModel : undefined,
+  nextPomodoroBreak: typeof nextPomodoroBreak === "function" ? nextPomodoroBreak : undefined,
   CRISP_LICENSE_PRODUCTS,
 };`;
   const timers = [];
@@ -1938,4 +1940,133 @@ test('non-object data.json content is treated as damaged, not as settings', asyn
     assert.equal([...files.keys()].filter((p) => p.includes('.corrupt-')).length, 1);
     assert.equal(plugin.settings.focusModeEnabled, true);
   } finally { plugin.onunload(); }
+});
+
+
+/* 番茄钟（1.5.0）。失败模式：
+   - 休息结束被旧版 Crisp Pulse 当成专注完成计分（旧版 Pulse 包装的是 completeFocusSession）。
+   - 第 N 个之后该长休却给了短休；休息结束后不等用户就开始下一个。
+   - 未激活也能开始番茄；中途结束没有告诉其他插件「这一段中断了」。
+   - 重载后等待中的番茄丢失，或关着 Obsidian 时跑完的番茄被当成完成。 */
+async function pomodoroPlugin({ licensed = true, saved = {} } = {}) {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  const events = [];
+  plugin.app.workspace.trigger = (name, payload) => { if (name === "crisp-focus:session") events.push(payload); };
+  plugin.app.workspace.getActiveFile = () => ({ path: "notes/draft.md" });
+  if (licensed) grantTestLicense(plugin);
+  plugin.loadData = async () => ({ sessionDurationMinutes: 25, ...saved });
+  let persisted = null;
+  plugin.saveData = async (value) => { persisted = JSON.parse(JSON.stringify(value)); };
+  await plugin.onload();
+  const chimes = [];
+  plugin.audio.playChime = (kind) => chimes.push(kind);
+  const finish = async () => { plugin.session.complete(); await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r)); };
+  return { plugin, events, chimes, finish, persisted: () => persisted };
+}
+
+test("a pomodoro cycle alternates focus and breaks, with a long break after the fourth", async () => {
+  const { plugin, events, chimes, finish } = await pomodoroPlugin();
+  await plugin.startPomodoro();
+  assert.equal(plugin.settings.sessionMeta.kind, "focus");
+  assert.equal(plugin.settings.focusModeEnabled, true);
+  assert.equal(plugin.statusBarEl.textContent, "专注 25:00 · 1/4");
+  const breaks = [];
+  for (let round = 1; round <= 4; round++) {
+    await finish();
+    breaks.push(plugin.settings.sessionMeta.phase);
+    assert.equal(plugin.settings.focusModeEnabled, false, "休息时关掉专注效果");
+    await finish();
+    assert.equal(plugin.session.getSnapshot().status, "idle", "休息结束后等用户开始下一个");
+    assert.equal(plugin.settings.pomodoroState.waiting, true);
+    if (round < 4) await plugin.startNextPomodoro();
+  }
+  assert.deepEqual(breaks, ["short-break", "short-break", "short-break", "long-break"]);
+  assert.equal(plugin.getPomodoroSnapshot().todayCount, 4);
+  assert.deepEqual(chimes, ["focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end"]);
+  const completes = events.filter((e) => e.type === "complete");
+  assert.deepEqual(completes.map((e) => `${e.kind}:${e.round}`), ["focus:1", "break:1", "focus:2", "break:2", "focus:3", "break:3", "focus:4", "break:4"]);
+  assert.ok(events.every((e) => e.apiVersion === 1 && e.notePath === "notes/draft.md"));
+  plugin.onunload();
+});
+
+test("an older Crisp Pulse wrapping completeFocusSession never sees a break completion", async () => {
+  const { plugin, finish } = await pomodoroPlugin();
+  const seen = [];
+  const original = plugin.completeFocusSession;
+  plugin.completeFocusSession = async function (...args) { seen.push(this.settings.sessionMeta?.kind); return original.apply(this, args); };
+  await plugin.startPomodoro();
+  await finish();
+  await finish();
+  assert.deepEqual(seen, ["focus"], "只有专注阶段经过 completeFocusSession");
+  plugin.onunload();
+});
+
+test("ending mid-focus reports an interrupted session; skipping a break starts the next focus", async () => {
+  const { plugin, events, finish } = await pomodoroPlugin();
+  await plugin.startPomodoro();
+  await finish();
+  await plugin.skipPomodoroBreak();
+  assert.equal(plugin.settings.sessionMeta.kind, "focus");
+  assert.equal(plugin.settings.sessionMeta.round, 2);
+  assert.equal(events.at(-2).type, "skip");
+  await plugin.endPomodoro();
+  const stop = events.at(-1);
+  assert.equal(stop.type, "stop");
+  assert.equal(stop.kind, "focus");
+  assert.equal(stop.completed, false);
+  assert.ok(stop.elapsedMs >= 0 && stop.elapsedMs < 60000);
+  assert.equal(plugin.settings.pomodoroState, null);
+  assert.equal(plugin.settings.focusModeEnabled, false);
+  plugin.onunload();
+});
+
+test("pomodoro requires activation while a single focus session stays free", async () => {
+  const { plugin, events } = await pomodoroPlugin({ licensed: false });
+  assert.equal(await plugin.startPomodoro(), null);
+  assert.equal(plugin.session.getSnapshot().status, "idle");
+  await plugin.startFocusSession(25);
+  assert.equal(plugin.session.getSnapshot().status, "running");
+  assert.equal(events.at(-1).pomodoro, false);
+  assert.equal(plugin.statusBarEl.textContent, "专注 25:00");
+  plugin.onunload();
+});
+
+test("a waiting pomodoro survives a reload; one that expired while closed is dropped", async () => {
+  const first = await pomodoroPlugin();
+  await first.plugin.startPomodoro();
+  await first.finish();
+  await first.finish();
+  first.plugin.onunload();
+  const waiting = await pomodoroPlugin({ saved: first.persisted() });
+  assert.equal(waiting.plugin.getPomodoroSnapshot().waiting, true);
+  assert.equal(waiting.plugin.statusBarEl.textContent, "下一个番茄 · 2/4");
+  waiting.plugin.onunload();
+  const expired = await pomodoroPlugin({ saved: {
+    sessionState: { status: "running", endAt: Date.now() - 1000, remainingMs: 0 },
+    sessionMeta: { id: "x", kind: "focus", phase: "focus", pomodoro: true, round: 1, plannedMinutes: 25, startedAt: Date.now() - 26 * 60000 },
+    pomodoroState: { active: true, round: 0, cycleId: "c", waiting: false },
+  } });
+  assert.equal(expired.plugin.settings.pomodoroState, null);
+  assert.equal(expired.plugin.settings.sessionMeta, null);
+  assert.equal(expired.events.length, 0, "没有亲眼看到跑完，不发完成事件");
+  expired.plugin.onunload();
+});
+
+test("the panel shows where you are in the set and what the next step is", () => {
+  const { pomodoroViewModel, nextPomodoroBreak } = loadPluginInternals();
+  const base = { status: "idle", remainingMs: 0, plannedMs: 0, kind: null, phase: null, pomodoro: false, active: false, waiting: false, round: 0, completedRounds: 0, every: 4, focusMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, todayCount: 0, todayFocusMinutes: 0, goal: 8, entitled: true };
+  const focus = pomodoroViewModel({ ...base, status: "running", kind: "focus", phase: "focus", pomodoro: true, active: true, round: 6, completedRounds: 5, remainingMs: 5 * 60000, plannedMs: 25 * 60000 }, 0);
+  assert.equal(focus.meta, "第 2 / 4 个", "第二组里的第 2 个");
+  assert.deepEqual(focus.slots.map((x) => x.state).join(","), "done,current,next,next");
+  assert.equal(focus.slots[1].p, 0.8);
+  const long = pomodoroViewModel({ ...base, status: "running", kind: "break", phase: "long-break", pomodoro: true, active: true, round: 4, completedRounds: 4, remainingMs: 60000, plannedMs: 15 * 60000 });
+  assert.equal(long.slots.filter((x) => x.state === "done").length, 4, "长休时这一组 4 个都完成");
+  assert.equal(long.actions.map((a) => a.id).join(","), "skip,end", "休息时不催你开始");
+  const locked = pomodoroViewModel({ ...base, entitled: false });
+  assert.equal(locked.actions[0].id, "activate");
+  assert.equal(nextPomodoroBreak(8, 4), "long-break");
+  assert.equal(nextPomodoroBreak(3, 4), "short-break");
 });

@@ -8,6 +8,7 @@ ambient soundscapes to Obsidian.
 - One Focus mode master switch that preserves individual feature choices.
 - Four atomic Focus scenes for silent, typewriter, rainy, and ocean writing.
 - Restorable 1–240 minute focus sessions with pause, resume, and status-bar controls.
+- Pomodoro timer (requires activation): focus and break phases with a long break after each set, a status-bar panel, phase chimes, and a daily goal.
 - Dual-mode typewriter scrolling with adjustable eye-line height, a soft tolerance band, and viewport-aware end padding.
 - Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes; mouse clicks and drag selections never move the page.
 - Adjustable animated cursor with reduced-motion support.
@@ -33,6 +34,21 @@ palette shortcuts, or click the `Focus` status-bar item. The status bar shows
 the remaining time and toggles pause/resume; ambient sound stays silent while a session is paused. Session state is stored in the
 current vault so an unfinished countdown survives plugin reloads. Completing
 or stopping a session turns Focus mode off and stops ambient audio.
+
+## Pomodoro
+
+Click the status-bar item (or run `Open pomodoro timer`) to open the pomodoro
+panel. A pomodoro alternates focus and break phases: 25-minute focus and
+5-minute short breaks by default, with a 15-minute long break after every four.
+Breaks turn Focus effects and ambient sound off; the next focus phase turns them
+back on. By default the next focus waits for you after a break. A soft two-note
+chime marks the end of each phase. The pomodoro timer requires a valid Crisp
+license; single focus sessions stay free.
+
+Other plugins can follow sessions through the `crisp-focus:session` workspace
+event (`apiVersion` 1). Each event carries the session id, `kind` (`focus` or
+`break`), `phase`, planned minutes, elapsed time and whether it completed;
+Crisp Pulse uses it to record focus time.
 
 ## License verification and privacy
 

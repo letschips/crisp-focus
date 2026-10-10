@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.4.5)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.5.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -27,6 +27,32 @@
 .crisp-focus-session-status.is-paused {
   color: var(--text-muted);
 }
+
+/* 状态栏前的小圆点：专注是番茄红，休息是绿色，暂停是空心 */
+.crisp-focus-session-status.is-pomodoro,
+.crisp-focus-session-status.is-running,
+.crisp-focus-session-status.is-paused {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.crisp-focus-session-status.is-pomodoro::before,
+.crisp-focus-session-status.is-running::before,
+.crisp-focus-session-status.is-paused::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--crisp-pomo-red);
+}
+.crisp-focus-session-status.is-running { color: var(--text-normal); }
+.crisp-focus-session-status.is-break::before { background: var(--crisp-pomo-green); }
+.crisp-focus-session-status.is-paused::before,
+.crisp-focus-session-status.is-waiting::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+.crisp-focus-session-status.is-open { background: var(--background-modifier-hover); }
 
 /* Hide native CM6 static text caret */
 .cm-editor.crisp-focus-active .cm-content .cm-line {
@@ -292,4 +318,186 @@
   .crisp-focus-setting-card__content-wrapper {
     transition: none !important;
   }
+}
+
+
+/* ==========================================================================
+   番茄钟面板
+   ========================================================================== */
+body {
+  --crisp-pomo-red: color-mix(in srgb, var(--color-red) 88%, var(--color-orange));
+  --crisp-pomo-green: var(--color-green);
+}
+
+.crisp-focus-pomo-popover {
+  position: fixed;
+  z-index: var(--layer-popover);
+  width: 296px;
+  border-radius: 16px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-l);
+  overflow: hidden;
+  animation: crisp-pomo-in 140ms ease-out;
+}
+
+@keyframes crisp-pomo-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.crisp-focus-pomo-modal .modal-content { padding: 0; }
+.crisp-focus-pomo-modal { width: min(360px, calc(100vw - 32px)); padding: 0; overflow: hidden; }
+
+.crisp-focus-pomo {
+  --pomo-tone: var(--crisp-pomo-red);
+  position: relative;
+  padding: 22px 20px 16px;
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+}
+.crisp-focus-pomo[data-tone="break"] { --pomo-tone: var(--crisp-pomo-green); }
+
+/* 顶部一条 2px 的进度线 */
+.crisp-focus-pomo__bar {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: color-mix(in srgb, var(--pomo-tone) 12%, transparent);
+}
+/* 没在计时时不画进度线 */
+.crisp-focus-pomo:is([data-state="idle"], [data-state="locked"], [data-state="waiting"]) .crisp-focus-pomo__bar { display: none; }
+.crisp-focus-pomo__bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--pomo-tone);
+  transition: width 1s linear;
+}
+
+.crisp-focus-pomo__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.crisp-focus-pomo__pill {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--pomo-tone);
+  background: color-mix(in srgb, var(--pomo-tone) 12%, transparent);
+}
+.crisp-focus-pomo__meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.crisp-focus-pomo__time {
+  margin: 18px 0 4px;
+  font-size: 52px;
+  line-height: 1;
+  font-weight: 300;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+/* 暂停：数字和阶段标签变灰，按钮仍用阶段的颜色 */
+.crisp-focus-pomo.is-paused .crisp-focus-pomo__time { color: var(--text-muted); }
+.crisp-focus-pomo.is-paused .crisp-focus-pomo__pill { color: var(--text-muted); background: var(--background-modifier-hover); }
+.crisp-focus-pomo.is-paused .crisp-focus-pomo__bar-fill { background: var(--text-faint); }
+.crisp-focus-pomo[data-state="locked"] .crisp-focus-pomo__time { color: var(--text-faint); }
+.crisp-focus-pomo__sub {
+  min-height: 1.4em;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 番茄位：完成的是带果蒂的实心番茄，当前这个像钟面一样扫过，没做的是空心圈 */
+.crisp-focus-pomo__slots {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin: 18px 0 20px;
+}
+.crisp-focus-pomo__slots.is-empty { display: none; }
+.crisp-focus-pomo__slot {
+  --p: 0;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--background-modifier-border-hover);
+}
+.crisp-focus-pomo__slot.is-done {
+  background: var(--crisp-pomo-red);
+  box-shadow: none;
+}
+.crisp-focus-pomo__slot.is-done::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 6px;
+  height: 3px;
+  border-radius: 3px 3px 1px 1px;
+  background: var(--crisp-pomo-green);
+  transform: translateX(-50%) rotate(-12deg);
+}
+.crisp-focus-pomo__slot.is-current {
+  box-shadow: none;
+  background: conic-gradient(var(--pomo-tone) calc(var(--p) * 1turn), color-mix(in srgb, var(--pomo-tone) 16%, transparent) 0);
+}
+
+.crisp-focus-pomo__actions {
+  display: flex;
+  gap: 8px;
+}
+.crisp-focus-pomo button.crisp-focus-pomo__btn {
+  flex: 1 1 0;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: none;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+  cursor: pointer;
+}
+.crisp-focus-pomo button.crisp-focus-pomo__btn:hover { background: var(--background-modifier-active-hover); }
+.crisp-focus-pomo button.crisp-focus-pomo__btn.is-primary {
+  flex-grow: 1.6;
+  color: #fff;
+  background: var(--pomo-tone);
+}
+.crisp-focus-pomo button.crisp-focus-pomo__btn.is-primary:hover { background: color-mix(in srgb, var(--pomo-tone) 88%, #000); }
+.crisp-focus-pomo button.crisp-focus-pomo__btn:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+
+.crisp-focus-pomo__foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.crisp-focus-pomo__count {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crisp-focus-pomo-popover { animation: none; }
+  .crisp-focus-pomo__bar-fill { transition: none; }
 }
