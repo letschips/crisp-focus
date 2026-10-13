@@ -235,7 +235,7 @@ function createHost({ tagName, contentEditable = false, ancestors = [] }) {
   };
 }
 
-function createObsidianMock() {
+function createObsidianMock(options = {}) {
   class Plugin {
     addCommand() {}
     addSettingTab() {}
@@ -260,6 +260,7 @@ function createObsidianMock() {
   return {
     MarkdownView: class MarkdownView {},
     Notice: class Notice {},
+    Platform: { isMobile: !!options.mobile },
     Plugin,
     PluginSettingTab: class PluginSettingTab {},
     Setting: class Setting {},
@@ -308,7 +309,7 @@ module.exports.__test = {
     console,
     module: { exports: {} },
     require(name) {
-      if (name === "obsidian") return createObsidianMock();
+      if (name === "obsidian") return createObsidianMock(options);
       if (name === "@codemirror/view" && options.codemirrorView) {
         return options.codemirrorView;
       }
@@ -570,6 +571,7 @@ test("applying a scene refreshes the live typewriter viewport immediately", asyn
   windowObject.addCursorFixture(editor, { style: {} });
 
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     focusModeEnabled: true,
@@ -1230,6 +1232,7 @@ test("iOS screen keyboard: beforeinput insertText plays character sound without 
 test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
   const { CrispTypewriterEngine } = loadPluginInternals();
   const mockPlugin = {
+    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1272,6 +1275,7 @@ test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
 test("TypewriterEngine: Strict mode locks cursor precisely to target height", () => {
   const { CrispTypewriterEngine } = loadPluginInternals();
   const mockPlugin = {
+    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1305,6 +1309,7 @@ test("TypewriterEngine: user scroll pause and resume on user activity", () => {
   const { CrispTypewriterEngine } = loadPluginInternals();
   let scheduledScroll = null;
   const mockPlugin = {
+    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1356,6 +1361,7 @@ test("TypewriterEngine: reduced-motion preference disables smooth scrolling", ()
   const { CrispTypewriterEngine } = loadPluginInternals();
   let smoothScrollCalls = 0;
   const mockPlugin = {
+    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1420,6 +1426,7 @@ test("Typewriter ViewPlugin distinguishes user scroll intent from programmatic s
   };
   let userScrollSignals = 0;
   const plugin = {
+    licenseManager: { isEntitled: () => true },
     mainWindow: windowObject,
     settings: {
       focusModeEnabled: true,
@@ -1475,6 +1482,7 @@ test("typewriter bottom padding follows each editor viewport instead of the app 
   windowObject.addCursorFixture(editor, { style: {} });
 
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     focusModeEnabled: true,
@@ -1540,6 +1548,7 @@ test("Typewriter styles and toggle commands update editor classes and CSS variab
 test("TypewriterEngine: skips canvas nodes, modal prompts, and protects text range selections", () => {
   const { CrispTypewriterEngine } = loadPluginInternals();
   const mockPlugin = {
+    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1803,6 +1812,7 @@ test('pointer-driven selections do not scroll the typewriter viewport under the 
   const windowObject = { cancelAnimationFrame() {}, requestAnimationFrame(cb) { cb(); return 1; } };
   let scrolls = 0;
   const plugin = {
+    licenseManager: { isEntitled: () => true },
     mainWindow: windowObject,
     settings: { focusModeEnabled: true, typewriterScrollEnabled: true, typewriterScrollOffset: 42 },
     typewriterEngine: { onUserActivity() {}, onUserScroll() {}, requestScroll() { scrolls += 1; } },
@@ -2069,4 +2079,176 @@ test("the panel shows where you are in the set and what the next step is", () =>
   assert.equal(locked.actions[0].id, "activate");
   assert.equal(nextPomodoroBreak(8, 4), "long-break");
   assert.equal(nextPomodoroBreak(3, 4), "short-break");
+});
+
+/* 清爽打字（1.6.0）。失败模式：
+   - 退出时把用户原本就收着的侧栏也展开了，或者没把原本打开的侧栏放回来。
+   - 插件卸载/重载时还停在清爽打字：侧栏不回来、界面元素一直隐藏。
+   - 新开的弹出窗口不跟随；状态栏开关要重进一次才生效。
+   - 手机端隐藏视图标题栏后没有返回入口。
+   - 标签栏被 display:none 拿掉，窗口顶部失去拖动区域。 */
+async function cleanTypingPlugin({ left = true, right = true, saved = {}, mobile = false, licensed = true } = {}) {
+  const { CrispFocusPlugin } = loadPluginInternals({ mobile });
+  const { windowObject } = createWindow();
+  windowObject.document.body = { classList: createClassList() };
+  const plugin = new CrispFocusPlugin();
+  const license = { valid: licensed };
+  plugin.licenseVerifier = async () => (license.valid
+    ? { valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], userName: "Test user" } }
+    : { valid: false, reason: "未激活" });
+  plugin.app = createPluginApp(windowObject);
+  const split = (open) => ({
+    collapsed: !open,
+    collapse() { this.collapsed = true; },
+    expand() { this.collapsed = false; },
+  });
+  plugin.app.workspace.leftSplit = split(left);
+  plugin.app.workspace.rightSplit = split(right);
+  plugin.loadData = async () => ({ ...saved });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  return { plugin, license, windowObject, body: windowObject.document.body, workspace: plugin.app.workspace };
+}
+
+test("clean typing collapses open sidebars and restores only the ones it collapsed", async () => {
+  const { plugin, body, workspace } = await cleanTypingPlugin({ left: true, right: false });
+  try {
+    assert.equal(plugin.setCleanTypingEnabled(true), true);
+    assert.equal(workspace.leftSplit.collapsed, true);
+    assert.equal(workspace.rightSplit.collapsed, true);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing"), true);
+
+    plugin.setCleanTypingEnabled(false);
+    assert.equal(workspace.leftSplit.collapsed, false);
+    assert.equal(workspace.rightSplit.collapsed, true, "a sidebar that was already closed stays closed");
+    assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
+  } finally { plugin.onunload(); }
+});
+
+test("unloading the plugin during clean typing brings the workspace back", async () => {
+  const { plugin, body, workspace } = await cleanTypingPlugin();
+  plugin.setCleanTypingEnabled(true);
+  plugin.onunload();
+  assert.equal(workspace.leftSplit.collapsed, false);
+  assert.equal(workspace.rightSplit.collapsed, false);
+  assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
+  assert.equal(body.classList.contains("crisp-focus-clean-typing--hide-status"), false);
+});
+
+test("clean typing follows pop-out windows and applies the status bar option live", async () => {
+  const { plugin, body, workspace } = await cleanTypingPlugin();
+  try {
+    plugin.setCleanTypingEnabled(true);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing--hide-status"), true, "status bar hidden by default");
+
+    const { windowObject: popout } = createWindow();
+    popout.document.body = { classList: createClassList() };
+    workspace.emit("window-open", {}, popout);
+    assert.equal(popout.document.body.classList.contains("crisp-focus-clean-typing"), true);
+
+    await plugin.setCleanTypingHideStatusBar(false);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing--hide-status"), false);
+    assert.equal(popout.document.body.classList.contains("crisp-focus-clean-typing--hide-status"), false);
+    assert.equal(plugin.settings.cleanTypingHideStatusBar, false);
+  } finally { plugin.onunload(); }
+});
+
+test("clean typing stays off on mobile, where the view header is the way back", async () => {
+  const { plugin, body, workspace } = await cleanTypingPlugin({ mobile: true });
+  try {
+    assert.equal(plugin.setCleanTypingEnabled(true), false);
+    assert.equal(plugin.cleanTypingActive, false);
+    assert.equal(workspace.leftSplit.collapsed, false);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
+  } finally { plugin.onunload(); }
+});
+
+test("clean typing styles keep the window draggable and avoid compositor layers", () => {
+  const styles = fs.readFileSync(stylesPath, "utf8");
+  const rules = styles.split("}").filter((rule) => rule.includes("crisp-focus-clean-typing"));
+  assert.ok(rules.length > 0, "clean typing has styles");
+  for (const rule of rules) {
+    if (rule.includes("workspace-tab-header-container")) {
+      assert.doesNotMatch(rule, /display:\s*none|visibility:\s*hidden/, "the tab strip is the window's drag region");
+    }
+    assert.doesNotMatch(rule, /backdrop-filter|will-change|translate3d/);
+  }
+  // Obsidian 1.9+ marks the ribbons mod-primary / mod-secondary, not mod-left.
+  assert.match(styles, /body\.crisp-focus-clean-typing \.workspace-ribbon[,\s{]/);
+});
+
+/* 激活门槛（1.6.0）：清爽打字与打字机定焦需要激活。失败模式：
+   - 未激活也能进入清爽打字，或打字机定焦照常滚动、注入底部留白。
+   - 未激活时把用户已保存的定焦开关改掉，激活后还得重新打开。
+   - 激活成功后要重启才生效；授权被撤销后定焦和清爽打字还挂着。 */
+function typewriterFixture(windowObject) {
+  const editor = { classList: createClassList(), style: createStyle() };
+  windowObject.addCursorFixture(editor, { style: {} });
+  return editor;
+}
+
+function farCursorView() {
+  return {
+    scrollDOM: {
+      getBoundingClientRect: () => ({ top: 0, height: 1000 }),
+      scrollTop: 100,
+      scrollHeight: 3000,
+      clientHeight: 1000,
+    },
+    state: { selection: { main: { head: 10 } } },
+    coordsAtPos: () => ({ top: 900 }),
+  };
+}
+
+test("clean typing requires activation", async () => {
+  const { plugin, body, workspace } = await cleanTypingPlugin({ licensed: false });
+  try {
+    assert.equal(plugin.setCleanTypingEnabled(true), false);
+    assert.equal(plugin.cleanTypingActive, false);
+    assert.equal(workspace.leftSplit.collapsed, false);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
+  } finally { plugin.onunload(); }
+});
+
+test("typewriter scrolling stays inert until activation, then works without re-enabling", async () => {
+  const { plugin, license, windowObject } = await cleanTypingPlugin({
+    licensed: false,
+    saved: { focusModeEnabled: true, typewriterScrollEnabled: true },
+  });
+  const editor = typewriterFixture(windowObject);
+  try {
+    plugin.updateTypewriterStyles();
+    assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), false);
+    assert.equal(plugin.typewriterEngine.calculateScrollDelta(farCursorView()), 0);
+    assert.equal(plugin.settings.typewriterScrollEnabled, true, "the saved choice is kept");
+
+    await plugin.setTypewriterScrollEnabled(false);
+    assert.equal(await plugin.setTypewriterScrollEnabled(true), false, "cannot be switched on before activation");
+    assert.equal(plugin.settings.typewriterScrollEnabled, false);
+
+    plugin.settings.typewriterScrollEnabled = true;
+    license.valid = true;
+    assert.equal((await plugin.activateLicense("signed-code")).valid, true);
+    assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), true, "applies right after activation");
+    assert.notEqual(plugin.typewriterEngine.calculateScrollDelta(farCursorView()), 0);
+  } finally { plugin.onunload(); }
+});
+
+test("losing the license removes typewriter styling and leaves clean typing", async () => {
+  const { plugin, license, windowObject, body, workspace } = await cleanTypingPlugin({
+    saved: { focusModeEnabled: true, typewriterScrollEnabled: true },
+  });
+  const editor = typewriterFixture(windowObject);
+  try {
+    plugin.updateTypewriterStyles();
+    plugin.setCleanTypingEnabled(true);
+    assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), true);
+
+    license.valid = false;
+    await plugin.refreshLicense();
+    assert.equal(editor.classList.contains("crisp-focus-typewriter-active"), false);
+    assert.equal(plugin.cleanTypingActive, false);
+    assert.equal(workspace.leftSplit.collapsed, false);
+    assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
+  } finally { plugin.onunload(); }
 });

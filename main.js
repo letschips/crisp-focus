@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.5.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1074,7 +1074,7 @@ class CrispTypewriterEngine {
   calculateScrollDelta(view, docChanged = false) {
     if (!view || !view.scrollDOM || !view.state || !view.state.selection) return 0;
     const settings = this.plugin?.settings;
-    if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return 0;
+    if (!isTypewriterActive(this.plugin)) return 0;
 
     // Avoid hijacking Canvas cards, prompt modals, or non-note editors
     if (view.dom && typeof view.dom.closest === "function") {
@@ -1143,7 +1143,7 @@ class CrispTypewriterEngine {
     if (this.userScrolling) return;
     if (this.plugin?.isComposing) return;
     const settings = this.plugin?.settings;
-    if (!settings || !settings.focusModeEnabled || !settings.typewriterScrollEnabled) return;
+    if (!isTypewriterActive(this.plugin)) return;
 
     const delta = this.calculateScrollDelta(view, docChanged);
     if (Math.abs(delta) < 2) return;
@@ -1223,13 +1223,24 @@ class CrispTypewriterEngine {
   }
 }
 
-function applyTypewriterStylesToEditor(editor, settings) {
+// 打字机定焦需要激活。未激活时保留用户的开关选择，激活后直接生效。
+function isTypewriterActive(plugin) {
+  const settings = plugin?.settings;
+  return Boolean(
+    settings?.focusModeEnabled
+    && settings?.typewriterScrollEnabled
+    && plugin?.licenseManager?.isEntitled?.()
+  );
+}
+
+function applyTypewriterStylesToEditor(editor, settings, entitled = false) {
   if (!editor) return;
   const excluded = typeof editor.closest === "function" && Boolean(
     editor.closest(".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal")
   );
   const enabled = Boolean(
     !excluded
+    && entitled
     && settings?.focusModeEnabled
     && settings?.typewriterScrollEnabled
   );
@@ -1305,7 +1316,7 @@ function createTypewriterExtension(plugin) {
       if (update.geometryChanged) {
         this.applyEditorStyles();
       }
-      if (!plugin.settings?.focusModeEnabled || !plugin.settings?.typewriterScrollEnabled) {
+      if (!isTypewriterActive(plugin)) {
         return;
       }
       // Only typewriter scroll on actual content typing or cursor movement
@@ -1340,7 +1351,7 @@ function createTypewriterExtension(plugin) {
 
     applyEditorStyles() {
       if (!this.view || !this.view.dom) return;
-      applyTypewriterStylesToEditor(this.view.dom, plugin.settings);
+      applyTypewriterStylesToEditor(this.view.dom, plugin.settings, plugin.licenseManager?.isEntitled?.());
     }
 
     destroy() {
@@ -1796,7 +1807,9 @@ const DEFAULT_SETTINGS = {
   pomodoroAutoStartFocus: false,
   pomodoroChime: true,
   pomodoroDailyGoal: 8,
-  pomodoroToday: { date: "", count: 0, focusMinutes: 0 }
+  pomodoroToday: { date: "", count: 0, focusMinutes: 0 },
+  // 清爽打字本身不保存，重启后回到普通界面；这里只存它的选项
+  cleanTypingHideStatusBar: true
 };
 
 function renderAboutCard(container, pluginName, description) {
@@ -1921,7 +1934,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(sceneGroup)
       .setName("当前场景")
-      .setDesc("静默写作免费可用；包含音效的场景需要激活。")
+      .setDesc("静默写作免费可用，其中的打字机定焦需要激活；包含音效的场景需要激活。")
       .addDropdown((dropdown) => {
         dropdown.addOption("custom", "自定义（当前设置）");
         Object.entries(FOCUS_SCENES).forEach(([sceneId, scene]) => {
@@ -1941,6 +1954,36 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
             this.display();
           });
       });
+
+    const cleanGroup = createGroup(
+      "清爽打字",
+      this.plugin.licenseManager.isEntitled()
+        ? "收起两侧栏，隐藏标签栏、标题栏和功能区，只留下正文。"
+        : "需要激活 Crisp Focus。激活后收起两侧栏和界面元素，只留下正文。",
+      true
+    );
+
+    new obsidian.Setting(cleanGroup)
+      .setName("进入清爽打字")
+      .setDesc("鼠标移到顶部时显示标签栏；用命令「Toggle clean typing」或这里的开关退出，退出后侧栏恢复原样。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.cleanTypingActive)
+          .onChange((val) => {
+            if (!this.plugin.setCleanTypingEnabled(val)) toggle.setValue(this.plugin.cleanTypingActive);
+          })
+      );
+
+    new obsidian.Setting(cleanGroup)
+      .setName("同时隐藏状态栏")
+      .setDesc("关闭后状态栏照常显示，方便看番茄钟倒计时。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.cleanTypingHideStatusBar !== false)
+          .onChange(async (val) => {
+            await this.plugin.setCleanTypingHideStatusBar(val);
+          })
+      );
 
     const sessionGroup = createGroup(
       "专注会话",
@@ -2069,7 +2112,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     } else if (this.plugin.settings.licenseCode) {
       statusSetting.setDesc(`❌ 未激活（${licenseStatus.reason || "授权码无效"}）`);
     } else {
-      statusSetting.setDesc("❌ 未激活（可免费使用动效光标，激活后解锁打字音效与 HD 环境音）");
+      statusSetting.setDesc("❌ 未激活（可免费使用动效光标与单次专注，激活后解锁打字机定焦、清爽打字、番茄钟、打字音效与 HD 环境音）");
     }
 
     new obsidian.Setting(licenseGroup)
@@ -2202,7 +2245,9 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 2: Typewriter Scrolling Engine
     const typewriterCard = createGroup(
       "打字机定焦",
-      "书写时让当前输入行回到舒适的黄金视线高度。",
+      this.plugin.licenseManager.isEntitled()
+        ? "书写时让当前输入行回到舒适的黄金视线高度。"
+        : "需要激活 Crisp Focus。激活后书写时让当前输入行回到舒适的黄金视线高度。",
       true
     );
 
@@ -2480,6 +2525,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       windowObj: winObj,
       onEntitlementLost: () => {
         if (this.audio) this.audio.stopAmbient();
+        this.updateTypewriterStyles();
+        if (this.cleanTypingActive) this.setCleanTypingEnabled(false);
       },
     });
     if (this.licenseVerifier) {
@@ -2531,6 +2578,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (this.settings.pomodoroState) this.settings.pomodoroState = null;
     }
     this.renderSessionStatus(restored);
+    this.cleanTypingActive = false;
+    this.cleanTypingRestore = null;
     this.windowBindings = new Map();
     this.attachWindow(winObj);
     this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, windowObj) => {
@@ -2567,7 +2616,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       const activeLeaf = tryPatchCursor();
       if (!activeLeaf) return;
       this.updateTypewriterStyles();
-      if (this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled && activeLeaf.editor.cm.hasFocus) {
+      if (isTypewriterActive(this) && activeLeaf.editor.cm.hasFocus) {
         this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "leaf-change");
       }
     };
@@ -2604,7 +2653,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       id: "toggle-typewriter-scroll",
       name: "Toggle typewriter scrolling",
       callback: async () => {
-        await this.setTypewriterScrollEnabled(!this.settings.typewriterScrollEnabled);
+        if (await this.setTypewriterScrollEnabled(!this.settings.typewriterScrollEnabled) === false) return;
         new obsidian.Notice(`Crisp Focus 打字机定焦已${this.settings.typewriterScrollEnabled ? "开启" : "关闭"}`);
       }
     });
@@ -2631,6 +2680,16 @@ class CrispFocusPlugin extends obsidian.Plugin {
         this.settings.typewriterAudioEnabled = !this.settings.typewriterAudioEnabled;
         await this.saveSettings();
         new obsidian.Notice(`Crisp Focus 音效已${this.settings.typewriterAudioEnabled ? "开启" : "静音"}`);
+      }
+    });
+
+    this.addCommand({
+      id: "toggle-clean-typing",
+      name: "Toggle clean typing",
+      callback: () => {
+        if (this.setCleanTypingEnabled(!this.cleanTypingActive)) {
+          new obsidian.Notice(`Crisp Focus 清爽打字已${this.cleanTypingActive ? "开启" : "关闭"}`);
+        }
       }
     });
 
@@ -2705,6 +2764,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   onunload() {
+    if (this.cleanTypingActive) this.setCleanTypingEnabled(false);
     if (this.cursorPatchTimer !== null && this.cursorPatchTimer !== undefined) {
       this.mainWindow.clearTimeout(this.cursorPatchTimer);
       this.cursorPatchTimer = null;
@@ -2814,6 +2874,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (result.valid) {
       this.settings.licenseCode = trimmed;
       await this.saveSettings();
+      this.updateTypewriterStyles();
       return result;
     }
     if (savedCode && savedCode !== trimmed) {
@@ -3254,7 +3315,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (this.settings.focusModeEnabled && this.settings.typewriterAudioEnabled) {
         this.audio.playSpaceKey();
       }
-      if (this.settings.focusModeEnabled && this.settings.typewriterScrollEnabled) {
+      if (isTypewriterActive(this)) {
         const activeLeaf = this.app?.workspace?.getActiveViewOfType?.(obsidian.MarkdownView);
         if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
           const win = windowObj || window;
@@ -3330,6 +3391,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       gestureHandler,
       keydownHandler,
     });
+    this.applyCleanTypingClasses(windowObj);
   }
 
   detachWindow(windowObj) {
@@ -3344,6 +3406,60 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.windowBindings.delete(windowObj);
   }
 
+  // 清爽打字：收起两侧栏，标题栏、功能区和侧栏按钮交给 styles.css 隐藏。
+  // 只恢复进入时由我们收起的那一侧；用户原本就收着的侧栏保持不动。
+  setCleanTypingEnabled(enabled) {
+    if (enabled === this.cleanTypingActive) return true;
+    // 手机端靠视图标题栏返回和切换笔记，隐藏后没有出口
+    if (enabled && obsidian.Platform?.isMobile) {
+      new obsidian.Notice("清爽打字目前只支持桌面端");
+      return false;
+    }
+    if (enabled && !this.licenseManager?.isEntitled()) {
+      new obsidian.Notice("🔒 清爽打字属于 Crisp 激活用户专属功能");
+      return false;
+    }
+    const workspace = this.app?.workspace;
+    if (enabled) {
+      this.cleanTypingRestore = {
+        left: !!workspace?.leftSplit && !workspace.leftSplit.collapsed,
+        right: !!workspace?.rightSplit && !workspace.rightSplit.collapsed,
+      };
+      if (this.cleanTypingRestore.left) workspace.leftSplit.collapse();
+      if (this.cleanTypingRestore.right) workspace.rightSplit.collapse();
+    } else {
+      const restore = this.cleanTypingRestore || {};
+      if (restore.left && workspace?.leftSplit?.collapsed) workspace.leftSplit.expand();
+      if (restore.right && workspace?.rightSplit?.collapsed) workspace.rightSplit.expand();
+      this.cleanTypingRestore = null;
+    }
+    this.cleanTypingActive = enabled;
+    this.applyCleanTypingClasses();
+    return true;
+  }
+
+  async setCleanTypingHideStatusBar(hidden) {
+    this.settings.cleanTypingHideStatusBar = hidden;
+    await this.saveSettings();
+    this.applyCleanTypingClasses();
+  }
+
+  applyCleanTypingClasses(onlyWindow = null) {
+    const windowObjects = onlyWindow
+      ? [onlyWindow]
+      : (this.windowBindings ? Array.from(this.windowBindings.keys()) : [this.mainWindow]);
+    const active = !!this.cleanTypingActive;
+    windowObjects.forEach((windowObj) => {
+      const body = windowObj?.document?.body;
+      if (!body || !body.classList) return;
+      body.classList.toggle("crisp-focus-clean-typing", active);
+      body.classList.toggle(
+        "crisp-focus-clean-typing--hide-status",
+        active && this.settings.cleanTypingHideStatusBar !== false
+      );
+    });
+  }
+
   async setAnimatedCursorEnabled(enabled) {
     this.markSceneCustom();
     this.settings.animatedCursorEnabled = enabled;
@@ -3354,6 +3470,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async setTypewriterScrollEnabled(enabled) {
+    if (enabled && !this.licenseManager.isEntitled()) {
+      new obsidian.Notice("🔒 打字机定焦属于 Crisp 激活用户专属功能");
+      return false;
+    }
     this.markSceneCustom();
     this.settings.typewriterScrollEnabled = enabled;
     await this.saveSettings();
@@ -3364,6 +3484,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
         this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "toggle");
       }
     }
+    return true;
   }
 
   async setTypewriterScrollMode(mode) {
@@ -3417,7 +3538,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     windowObjects.forEach((windowObj) => {
       if (!windowObj || !windowObj.document) return;
       windowObj.document.querySelectorAll(".cm-editor").forEach((editor) => {
-        applyTypewriterStylesToEditor(editor, this.settings);
+        applyTypewriterStylesToEditor(editor, this.settings, this.licenseManager?.isEntitled?.());
       });
     });
   }
