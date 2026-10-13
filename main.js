@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -152,6 +152,8 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
   }
 }
 
+const MAX_TIMER_DELAY = 0x7fffffff;
+
 class CrispFocusLicenseManager {
   constructor(app, settings, options = {}) {
     this.app = app;
@@ -160,6 +162,9 @@ class CrispFocusLicenseManager {
     this.now = options.now || (() => Date.now());
     this.onEntitlementLost = options.onEntitlementLost || (() => {});
     this.windowObj = options.windowObj || window;
+    this.setTimer = options.setTimeout || ((fn, delay) => this.windowObj.setTimeout(fn, delay));
+    this.clearTimer = options.clearTimeout || ((timer) => this.windowObj.clearTimeout(timer));
+    this.expiryTimer = null;
     this.status = { valid: false, reason: "尚未验证" };
 
     this.verificationId = 0;
@@ -167,7 +172,49 @@ class CrispFocusLicenseManager {
   }
 
   isEntitled() {
-    return this.status.valid === true;
+    if (this.status.valid !== true) return false;
+    const expiresAt = this.expiryTime();
+    return expiresAt === null || expiresAt > this.now();
+  }
+
+  expiryTime() {
+    const raw = this.status.valid === true ? this.status.payload?.expiresAt : null;
+    if (!raw) return null;
+    const time = new Date(raw).getTime();
+    return Number.isFinite(time) ? time : null;
+  }
+
+  // 应用一直开着跨过到期时间时，到点发出失效通知，让各功能收尾。
+  // setTimeout 超过 2^31-1 毫秒会溢出立即触发，所以远期到期分段等待。
+  scheduleExpiry() {
+    if (this.expiryTimer !== null) {
+      this.clearTimer(this.expiryTimer);
+      this.expiryTimer = null;
+    }
+    const expiresAt = this.expiryTime();
+    if (expiresAt === null) return;
+    const delay = expiresAt - this.now();
+    if (delay <= 0) {
+      this.expire();
+      return;
+    }
+    const clamped = delay + 1000 > MAX_TIMER_DELAY;
+    this.expiryTimer = this.setTimer(() => {
+      this.expiryTimer = null;
+      if (this.expiryTime() !== null && this.expiryTime() <= this.now()) this.expire();
+      else if (clamped) this.scheduleExpiry();
+    }, clamped ? MAX_TIMER_DELAY : delay + 1000);
+  }
+
+  expire() {
+    if (this.status.valid !== true) return;
+    this.status = { valid: false, reason: `授权已于 ${String(this.status.payload.expiresAt).split("T")[0]} 到期` };
+    this.onEntitlementLost(this.status);
+  }
+
+  destroy() {
+    if (this.expiryTimer !== null) this.clearTimer(this.expiryTimer);
+    this.expiryTimer = null;
   }
 
   getStatus() {
@@ -177,8 +224,9 @@ class CrispFocusLicenseManager {
   async initialize() {
     const id = ++this.verificationId;
     const result = await this.verifier(this.settings.licenseCode, "crisp-focus", this.app, this.windowObj, { skipOnline: true });
-    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
+    if (id !== this.verificationId) return { valid: false, stale: true, reason: "授权校验已被更新" };
     this.status = result;
+    this.scheduleExpiry();
     if (result.valid) this.backgroundVerification = this.verify();
     return result;
   }
@@ -193,7 +241,7 @@ class CrispFocusLicenseManager {
       result = { valid: false, reason: `授权验证失败: ${error.message || error}` };
     }
 
-    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
+    if (id !== this.verificationId) return { valid: false, stale: true, reason: "授权校验已被更新" };
 
     if (result.valid && result.source === "online") {
       this.settings.licenseLastOnlineAt = this.now();
@@ -203,6 +251,7 @@ class CrispFocusLicenseManager {
     if (wasEntitled && !this.isEntitled()) {
       this.onEntitlementLost(result);
     }
+    this.scheduleExpiry();
     return result;
   }
 }
@@ -2131,7 +2180,14 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         .setButtonText("激活 / 重新验证")
         .setCta()
         .onClick(async () => {
-          const result = await this.plugin.activateLicense(this.licenseDraft);
+          button.setDisabled(true);
+          let result;
+          try {
+            result = await this.plugin.activateLicense(this.licenseDraft);
+          } finally {
+            button.setDisabled(false);
+          }
+          if (result.stale) return;
           if (result.valid && result.payload) {
             new obsidian.Notice(`🎉 Crisp Focus 激活成功！欢迎使用，${result.payload.userName || "Crisp 用户"}`);
             this.display();
@@ -2582,6 +2638,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.cleanTypingRestore = null;
     this.windowBindings = new Map();
     this.attachWindow(winObj);
+    // 插件启用或重载前已经开着的弹出窗口不会再触发 window-open
+    this.attachExistingWindows();
+    this.app.workspace.onLayoutReady?.(() => this.attachExistingWindows());
     this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, windowObj) => {
       this.attachWindow(windowObj);
     }));
@@ -2791,6 +2850,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (this.session) {
       this.session.destroy();
     }
+    this.licenseManager?.destroy();
     this.closePomodoroPanel?.();
   }
 
@@ -2871,6 +2931,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const trimmed = (code || "").trim();
     const savedCode = this.settings.licenseCode;
     const result = await this.licenseManager.verify(trimmed);
+    // 已被更新的请求取代：结果作废，也不能回滚到旧授权码
+    if (result.stale) return result;
     if (result.valid) {
       this.settings.licenseCode = trimmed;
       await this.saveSettings();
@@ -3096,15 +3158,21 @@ class CrispFocusPlugin extends obsidian.Plugin {
       new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能，可以先用单次专注会话");
       return null;
     }
-    if (this.session.getSnapshot().status !== "idle") await this.stopFocusSession();
+    const stopping = this.session.getSnapshot().status !== "idle" ? this.stopFocusSession() : null;
     this.settings.pomodoroState = { active: true, round: 0, cycleId: newSessionId(), waiting: false };
-    return this.startPomodoroPhase("focus");
+    const started = this.startPomodoroPhase("focus");
+    await stopping;
+    return started;
   }
 
   async startPomodoroPhase(phase) {
     const state = this.settings.pomodoroState;
     if (!state?.active) return null;
     const kind = phase === "focus" ? "focus" : "break";
+    if (kind === "focus" && !this.licenseManager.isEntitled()) {
+      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
+      return null;
+    }
     const minutes = pomodoroPhaseMinutes(this.settings, phase);
     state.waiting = false;
     this.settings.sessionMeta = {
@@ -3112,12 +3180,14 @@ class CrispFocusPlugin extends obsidian.Plugin {
       plannedMinutes: minutes, startedAt: Date.now(), notePath: this.activeNotePath(),
     };
     if (kind === "focus") return this.startFocusSession(minutes, { pomodoro: true });
-    // 休息：关掉专注效果和环境音，只留倒计时
-    await this.setFocusModeEnabled(false);
+    // 休息：关掉专注效果和环境音，只留倒计时。
+    // 计时和事件先于写盘完成，写盘期间插进来的新动作看到的是一致的状态。
     this.session.start(minutes);
-    await this.saveSettings();
     this.emitSessionEvent("start");
-    return this.session.getSnapshot();
+    const snapshot = this.session.getSnapshot();
+    await this.setFocusModeEnabled(false);
+    await this.saveSettings();
+    return snapshot;
   }
 
   /** 休息结束后开始下一个番茄（不自动开始时由用户点）。 */
@@ -3134,6 +3204,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
   async skipPomodoroBreak() {
     const meta = this.settings.sessionMeta;
     if (meta?.kind !== "break" || this.session.getSnapshot().status === "idle") return null;
+    if (!this.licenseManager.isEntitled()) {
+      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
+      return null;
+    }
     this.emitSessionEvent("skip", { completed: false, elapsedMs: this.elapsedMs() });
     this.settings.sessionMeta = null;
     this.session.stop();
@@ -3198,11 +3272,12 @@ class CrispFocusPlugin extends obsidian.Plugin {
         plannedMinutes: duration, startedAt: Date.now(), notePath: this.activeNotePath(),
       };
     }
-    await this.setFocusModeEnabled(true);
     this.session.start(duration);
-    await this.saveSettings();
     this.emitSessionEvent("start");
-    return this.session.getSnapshot();
+    const snapshot = this.session.getSnapshot();
+    await this.setFocusModeEnabled(true);
+    await this.saveSettings();
+    return snapshot;
   }
 
   async pauseFocusSession() {
@@ -3394,6 +3469,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.applyCleanTypingClasses(windowObj);
   }
 
+  attachExistingWindows() {
+    this.app?.workspace?.iterateAllLeaves?.((leaf) => {
+      const windowObj = leaf?.view?.containerEl?.ownerDocument?.defaultView;
+      if (windowObj) this.attachWindow(windowObj);
+    });
+  }
+
   detachWindow(windowObj) {
     const binding = this.windowBindings && this.windowBindings.get(windowObj);
     if (!binding) return;
@@ -3565,6 +3647,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
   async setFocusModeEnabled(enabled) {
     this.settings.focusModeEnabled = enabled;
     await this.saveSettings();
+    // 写盘期间别的动作可能改了开关：按最新值收尾，旧动作不覆盖新动作
+    enabled = this.settings.focusModeEnabled;
     this.updateTypewriterStyles();
     if (!enabled) {
       this.clearCursorStyles();

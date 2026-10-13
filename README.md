@@ -37,13 +37,15 @@ status bar hides too unless you keep it in settings. Move the pointer to the top
 of the window to bring the tab bar back while switching notes; the top strip
 still drags the window. Leaving clean typing reopens only the sidebars that were
 open before. The mode is not saved: it ends when the plugin unloads or Obsidian
-restarts. Desktop only; requires a valid Crisp license.
+restarts. The view header is hidden only for notes, so other views keep their
+actions. Desktop only; requires a valid Crisp license.
 
 ## Focus sessions
 
 Start a custom-duration session from settings, use the 25/50-minute command
-palette shortcuts, or click the `Focus` status-bar item. The status bar shows
-the remaining time and toggles pause/resume; ambient sound stays silent while a session is paused. Session state is stored in the
+palette shortcuts, or open the panel from the status bar. The status bar shows
+the remaining time; clicking it opens the pomodoro panel, where a running
+session can be paused, resumed or ended. Ambient sound stays silent while a session is paused. Session state is stored in the
 current vault so an unfinished countdown survives plugin reloads. Completing
 or stopping a session turns Focus mode off and stops ambient audio.
 
@@ -67,7 +69,9 @@ Crisp Pulse uses it to record focus time.
 The animated cursor and single focus sessions are available without
 activation. Typewriter scrolling, clean typing, the pomodoro timer, typing
 feedback and ambient soundscapes require a valid Crisp license. Without one,
-saved typewriter choices are kept but have no effect until activation. License signatures are
+saved typewriter choices are kept but have no effect until activation. A
+license with an expiry date stops unlocking these features at that moment,
+even while Obsidian stays open. License signatures are
 validated locally first. The plugin then sends the license code, the current
 Obsidian app/device identifier, and the plugin ID to the Crisp license service
 to register or verify the device. If the service is unreachable, a license

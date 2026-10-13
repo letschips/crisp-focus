@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -504,6 +504,7 @@ body {
 
 /* --------------------------------------------------------------------------
    Clean typing: sidebars collapsed, chrome hidden, only the page remains.
+   The view header is hidden only for notes; other views keep their actions.
    The tab strip stays in the layout as the window's drag region and fades
    back in under the pointer; no compositor layers (translucent windows).
    -------------------------------------------------------------------------- */
@@ -515,7 +516,7 @@ body.crisp-focus-clean-typing .workspace-split.mod-root .workspace-tab-header-co
 body.crisp-focus-clean-typing .workspace-split.mod-root .workspace-tab-header-container:focus-within {
   opacity: 1;
 }
-body.crisp-focus-clean-typing .workspace-split.mod-root .view-header,
+body.crisp-focus-clean-typing .workspace-split.mod-root .workspace-leaf-content[data-type="markdown"] .view-header,
 body.crisp-focus-clean-typing .workspace-ribbon,
 body.crisp-focus-clean-typing--hide-status .status-bar {
   display: none;

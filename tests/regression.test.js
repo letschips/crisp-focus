@@ -2252,3 +2252,188 @@ test("losing the license removes typewriter styling and leaves clean typing", as
     assert.equal(body.classList.contains("crisp-focus-clean-typing"), false);
   } finally { plugin.onunload(); }
 });
+
+/* 1.6.1 审核修复。失败模式：
+   - 会话转换在写盘期间被新动作插队：旧转换随后启动的计时覆盖新会话，事件与计时对不上。
+   - 开始会话的写盘还没结束时暂停/结束无效，写盘结束后会话照样开始。
+   - 跳过休息绕过激活检查。
+   - 授权到期后仍按「已激活」运行，失效回调不触发；超长到期时间让定时器溢出立即触发。
+   - 插件加载前已经开着的弹出窗口没有接入。
+   - 并发激活时，过期的旧请求把新激活的状态回滚。
+   - 清爽打字把非写作视图（Tempo、Launchpad 等）的标题栏也一起藏掉。 */
+function blockNextSave(plugin) {
+  const original = plugin.saveData;
+  let release;
+  let blocked = true;
+  plugin.saveData = async (value) => {
+    if (blocked) {
+      blocked = false;
+      await new Promise((resolve) => { release = resolve; });
+    }
+    return original(value);
+  };
+  return () => release?.();
+}
+
+test("a new session started while a pomodoro break is being saved is not overwritten", async () => {
+  const { plugin, events } = await pomodoroPlugin();
+  try {
+    await plugin.startPomodoro();
+    const release = blockNextSave(plugin);
+    plugin.session.complete(); // focus done → transition to short break begins and waits on disk
+    await plugin.startFocusSession(50);
+    release();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const snap = plugin.session.getSnapshot();
+    assert.equal(snap.status, "running");
+    assert.equal(Math.round(snap.remainingMs / 60000), 50);
+    assert.equal(plugin.settings.sessionMeta.plannedMinutes, 50);
+    assert.equal(plugin.settings.sessionMeta.pomodoro, false);
+    assert.equal(plugin.settings.focusModeEnabled, true, "the older break transition must not switch Focus off");
+    assert.equal(events.filter((e) => e.type === "start" && e.plannedMinutes === 50).length, 1);
+    const breakStart = events.find((e) => e.type === "start" && e.kind === "break");
+    if (breakStart) {
+      assert.ok(events.some((e) => e.type === "stop" && e.id === breakStart.id), "an interrupted break is reported as stopped");
+    }
+  } finally { plugin.onunload(); }
+});
+
+test("pause and stop during a slow session start take effect", async () => {
+  for (const action of ["stop", "pause"]) {
+    const { plugin, events } = await pomodoroPlugin();
+    try {
+      const release = blockNextSave(plugin);
+      const starting = plugin.startFocusSession(25);
+      if (action === "stop") await plugin.stopFocusSession();
+      else await plugin.pauseFocusSession();
+      release();
+      await starting;
+      const snap = plugin.session.getSnapshot();
+      if (action === "stop") {
+        assert.equal(snap.status, "idle");
+        assert.equal(plugin.settings.focusModeEnabled, false);
+        assert.deepEqual(events.map((e) => e.type), ["start", "stop"]);
+      } else {
+        assert.equal(snap.status, "paused");
+        assert.deepEqual(events.map((e) => e.type), ["start", "pause"]);
+      }
+    } finally { plugin.onunload(); }
+  }
+});
+
+test("skipping a break needs a valid license like starting the next pomodoro", async () => {
+  const { plugin } = await pomodoroPlugin();
+  try {
+    await plugin.startPomodoro();
+    plugin.session.complete();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(plugin.settings.sessionMeta.kind, "break");
+    plugin.licenseManager.status = { valid: false, reason: "revoked" };
+    assert.equal(await plugin.skipPomodoroBreak(), null);
+    assert.equal(plugin.settings.sessionMeta.kind, "break", "the break keeps running");
+  } finally { plugin.onunload(); }
+});
+
+test("a verified license expires on time and notifies once, even far in the future", async () => {
+  const { CrispFocusLicenseManager } = loadPluginInternals();
+  let now = 1_000;
+  const timers = [];
+  let losses = 0;
+  const expiresAt = new Date(5_000).toISOString();
+  const manager = new CrispFocusLicenseManager(null, { licenseCode: "code" }, {
+    now: () => now,
+    setTimeout: (fn, delay) => { timers.push({ fn, delay }); return timers.length; },
+    clearTimeout: () => {},
+    onEntitlementLost: () => { losses += 1; },
+    verifier: async () => ({ valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], expiresAt } }),
+  });
+  await manager.verify();
+  assert.equal(manager.isEntitled(), true);
+  now = 6_000;
+  assert.equal(manager.isEntitled(), false, "expiry is honoured even before the timer fires");
+  timers.at(-1).fn();
+  assert.equal(losses, 1);
+  assert.equal(manager.isEntitled(), false);
+
+  // Far expiry: delays above 2^31-1 ms would overflow and fire at once.
+  now = 0;
+  const far = new CrispFocusLicenseManager(null, { licenseCode: "code" }, {
+    now: () => now,
+    setTimeout: (fn, delay) => { timers.push({ fn, delay }); return timers.length; },
+    clearTimeout: () => {},
+    onEntitlementLost: () => { losses += 1; },
+    verifier: async () => ({ valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], expiresAt: new Date(100 * 86_400_000).toISOString() } }),
+  });
+  await far.verify();
+  const pending = timers.at(-1);
+  assert.ok(pending.delay <= 0x7fffffff);
+  pending.fn(); // checkpoint before expiry: still valid, re-armed
+  assert.equal(far.isEntitled(), true);
+  assert.equal(losses, 1);
+  far.destroy();
+});
+
+test("pop-out windows opened before the plugin loads are attached", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject: main } = createWindow();
+  const { windowObject: popout } = createWindow();
+  main.document.body = { classList: createClassList() };
+  popout.document.body = { classList: createClassList() };
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(main);
+  plugin.app.workspace.iterateAllLeaves = (cb) => {
+    cb({ view: { containerEl: { ownerDocument: { defaultView: main } } } });
+    cb({ view: { containerEl: { ownerDocument: { defaultView: popout } } } });
+  };
+  grantTestLicense(plugin);
+  plugin.loadData = async () => ({});
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    assert.equal(plugin.windowBindings.has(popout), true);
+    assert.equal(plugin.windowBindings.size, 2);
+    plugin.setCleanTypingEnabled(true);
+    assert.equal(popout.document.body.classList.contains("crisp-focus-clean-typing"), true);
+  } finally { plugin.onunload(); }
+});
+
+test("a stale activation request never rolls back a newer successful one", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  const pending = {};
+  plugin.licenseVerifier = (code) => {
+    if (code === "old") return Promise.resolve({ valid: false, reason: "old revoked" });
+    if (!code) return Promise.resolve({ valid: false, reason: "授权码为空" });
+    return new Promise((resolve) => { pending[code] = resolve; });
+  };
+  plugin.loadData = async () => ({ licenseCode: "old" });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    const ok = { valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"] } };
+    const first = plugin.activateLicense("candidate-A");
+    const second = plugin.activateLicense("candidate-B");
+    pending["candidate-B"](ok);
+    await second;
+    pending["candidate-A"](ok);
+    await first;
+    assert.equal(plugin.settings.licenseCode, "candidate-B");
+    assert.equal(plugin.licenseManager.isEntitled(), true);
+  } finally { plugin.onunload(); }
+});
+
+test("clean typing hides the view header only in writing views", () => {
+  const styles = fs.readFileSync(stylesPath, "utf8");
+  const rules = styles.split("}").filter((rule) => rule.includes("crisp-focus-clean-typing") && rule.includes(".view-header"));
+  assert.ok(rules.length > 0);
+  for (const rule of rules) {
+    const selectors = rule.slice(rule.lastIndexOf("{") === -1 ? 0 : 0, rule.indexOf("{")).split(",").filter((s) => s.includes(".view-header"));
+    for (const selector of selectors) {
+      assert.match(selector, /data-type="markdown"/, `view header rule must be scoped: ${selector.trim()}`);
+    }
+  }
+});
