@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1663,11 +1663,22 @@ function formatSessionRemaining(remainingMs) {
 }
 
 // 番茄钟：专注 → 短休，每 N 个专注后换成长休。专注阶段沿用专注会话的计时与环境音，休息阶段关掉专注效果。
-const FOCUS_API_VERSION = 1;
+// 2：开始专注/番茄时可传 { task }，事件和快照带上这段专注属于哪个任务（Crisp Tempo）。
+const FOCUS_API_VERSION = 2;
 const POMODORO_PHASE_LABELS = Object.freeze({ focus: "专注", "short-break": "短休", "long-break": "长休" });
 
 function clampMinutes(value, fallback, max = 240) {
   return Math.max(1, Math.min(max, Math.round(Number(value) || fallback)));
+}
+
+/** 别的插件传来的任务：只留来源插件、任务标识和一行标题，格式不对就当没有任务。 */
+function focusTaskContext(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const source = typeof raw.source === "string" ? raw.source : "";
+  const id = typeof raw.id === "string" ? raw.id : "";
+  const title = typeof raw.title === "string" ? raw.title.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+  if (!/^[a-z0-9-]{1,64}$/.test(source) || !/^[A-Za-z0-9_-]{1,128}$/.test(id) || !title) return null;
+  return { source, id, title };
 }
 
 function pomodoroPhaseMinutes(settings, phase) {
@@ -1700,6 +1711,13 @@ function clockTime(ms) {
 /* 番茄钟面板显示什么：由 getPomodoroSnapshot() 推出来，渲染只照着画。
    state: locked | idle | single | focus | break | waiting；actions 的 id 对应面板按钮。 */
 function pomodoroViewModel(snap, now = Date.now()) {
+  const vm = pomodoroPhaseViewModel(snap, now);
+  // 这段专注属于哪个任务（从 Crisp Tempo 开始时才有）；没在计时、也不在一轮番茄里就不显示
+  vm.task = vm.state !== "idle" && vm.state !== "locked" && snap.task?.title ? snap.task.title : "";
+  return vm;
+}
+
+function pomodoroPhaseViewModel(snap, now) {
   const every = snap.every || 4;
   const paused = snap.status === "paused";
   const running = snap.status !== "idle";
@@ -1758,7 +1776,7 @@ class PomodoroPanelView {
     if (!this.root?.isConnected) return;
     const snap = this.plugin.getPomodoroSnapshot();
     const vm = pomodoroViewModel(snap);
-    const signature = JSON.stringify([vm.state, vm.tone, !!vm.paused, vm.pill, vm.meta, vm.slots.map((x) => x.state), vm.actions.map((a) => a.id), vm.foot && [vm.foot.count, vm.foot.goal, vm.foot.minutes]]);
+    const signature = JSON.stringify([vm.state, vm.tone, !!vm.paused, vm.pill, vm.meta, vm.task, vm.slots.map((x) => x.state), vm.actions.map((a) => a.id), vm.foot && [vm.foot.count, vm.foot.goal, vm.foot.minutes]]);
     if (signature !== this.signature) {
       this.signature = signature;
       this.build(vm);
@@ -1779,6 +1797,7 @@ class PomodoroPanelView {
     const head = root.createDiv({ cls: "crisp-focus-pomo__head" });
     head.createSpan({ cls: "crisp-focus-pomo__pill", text: vm.pill });
     if (vm.meta) head.createSpan({ cls: "crisp-focus-pomo__meta", text: vm.meta });
+    if (vm.task) root.createDiv({ cls: "crisp-focus-pomo__task", text: vm.task, attr: { title: vm.task } });
     this.timeEl = root.createDiv({ cls: "crisp-focus-pomo__time", attr: { role: "timer", "aria-live": "off" } });
     this.subEl = root.createDiv({ cls: "crisp-focus-pomo__sub" });
     const slots = root.createDiv({ cls: "crisp-focus-pomo__slots", attr: { "aria-hidden": "true" } });
@@ -3005,7 +3024,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     } else {
       this.statusBarEl.setText("专注");
     }
-    this.statusBarEl.title = "打开番茄钟";
+    const task = snapshot.status !== "idle" || pomodoro ? focusTaskContext(meta?.task || pomodoro?.task) : null;
+    this.statusBarEl.title = task ? `${task.title} · 打开番茄钟` : "打开番茄钟";
   }
 
   /** 状态栏上方弹出的番茄钟面板；再点一次状态栏、点面板外面或按 Esc 关闭。 */
@@ -3114,6 +3134,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       startedAt: meta.startedAt,
       at: Date.now(),
       notePath: meta.notePath || null,
+      task: focusTaskContext(meta.task),
       ...extra,
     };
     try {
@@ -3149,17 +3170,18 @@ class CrispFocusPlugin extends obsidian.Plugin {
       todayFocusMinutes: today.focusMinutes || 0,
       goal: Math.max(1, Math.min(24, Math.round(Number(this.settings.pomodoroDailyGoal) || 8))),
       entitled: !!this.licenseManager?.isEntitled(),
+      task: focusTaskContext(meta?.task || state?.task),
     };
   }
 
-  /** 番茄钟需要激活；单次专注会话仍然免费。 */
-  async startPomodoro() {
+  /** 番茄钟需要激活；单次专注会话仍然免费。options.task：整轮番茄都记在这个任务上。 */
+  async startPomodoro(options = {}) {
     if (!this.licenseManager.isEntitled()) {
       new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能，可以先用单次专注会话");
       return null;
     }
     const stopping = this.session.getSnapshot().status !== "idle" ? this.stopFocusSession() : null;
-    this.settings.pomodoroState = { active: true, round: 0, cycleId: newSessionId(), waiting: false };
+    this.settings.pomodoroState = { active: true, round: 0, cycleId: newSessionId(), waiting: false, task: focusTaskContext(options?.task) };
     const started = this.startPomodoroPhase("focus");
     await stopping;
     return started;
@@ -3177,7 +3199,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     state.waiting = false;
     this.settings.sessionMeta = {
       id: newSessionId(), kind, phase, pomodoro: true, round: kind === "focus" ? state.round + 1 : state.round,
-      plannedMinutes: minutes, startedAt: Date.now(), notePath: this.activeNotePath(),
+      plannedMinutes: minutes, startedAt: Date.now(), notePath: this.activeNotePath(), task: focusTaskContext(state.task),
     };
     if (kind === "focus") return this.startFocusSession(minutes, { pomodoro: true });
     // 休息：关掉专注效果和环境音，只留倒计时。
@@ -3269,7 +3291,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.settings.pomodoroState = null;
       this.settings.sessionMeta = {
         id: newSessionId(), kind: "focus", phase: "focus", pomodoro: false, round: 0,
-        plannedMinutes: duration, startedAt: Date.now(), notePath: this.activeNotePath(),
+        plannedMinutes: duration, startedAt: Date.now(), notePath: this.activeNotePath(), task: focusTaskContext(options.task),
       };
     }
     this.session.start(duration);

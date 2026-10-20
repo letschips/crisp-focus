@@ -1998,7 +1998,7 @@ test("a pomodoro cycle alternates focus and breaks, with a long break after the 
   assert.deepEqual(chimes, ["focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end"]);
   const completes = events.filter((e) => e.type === "complete");
   assert.deepEqual(completes.map((e) => `${e.kind}:${e.round}`), ["focus:1", "break:1", "focus:2", "break:2", "focus:3", "break:3", "focus:4", "break:4"]);
-  assert.ok(events.every((e) => e.apiVersion === 1 && e.notePath === "notes/draft.md"));
+  assert.ok(events.every((e) => e.apiVersion === 2 && e.notePath === "notes/draft.md" && e.task === null));
   plugin.onunload();
 });
 
@@ -2079,6 +2079,91 @@ test("the panel shows where you are in the set and what the next step is", () =>
   assert.equal(locked.actions[0].id, "activate");
   assert.equal(nextPomodoroBreak(8, 4), "long-break");
   assert.equal(nextPomodoroBreak(3, 4), "short-break");
+});
+
+/* 绑定任务的专注（1.7.0，配合 Crisp Tempo）。失败模式：
+   - 番茄整轮里第二个专注丢了任务，投入只记到第一个。
+   - 换任务开始新的专注时，被打断的那段记到新任务上。
+   - 别的插件传来的任务字段（来源、标识、标题）原样进事件。
+   - 重载后正在进行的专注忘了属于哪个任务；面板看不出在为哪件事专注。
+   - 老调用方不传任务却继承了上一轮的任务。 */
+const TEMPO_TASK = { source: "crisp-tempo", id: "task-1760000000000-ab12", title: "修复转写回链" };
+
+test("every event of a task-bound pomodoro cycle names the task", async () => {
+  const { plugin, events, finish } = await pomodoroPlugin();
+  assert.equal(plugin.focusApiVersion, 2);
+  await plugin.startPomodoro({ task: TEMPO_TASK });
+  await finish();
+  await plugin.skipPomodoroBreak();
+  await plugin.endPomodoro();
+  assert.deepEqual(events.map((e) => `${e.type}:${e.kind}:${e.round}`), ["start:focus:1", "complete:focus:1", "start:break:1", "skip:break:1", "start:focus:2", "stop:focus:2"]);
+  assert.ok(events.every((e) => e.apiVersion === 2 && e.task && e.task.id === TEMPO_TASK.id && e.task.source === "crisp-tempo" && e.task.title === "修复转写回链"));
+  await plugin.startPomodoro();
+  assert.equal(events.at(-1).task, null, "不带任务开始的新一轮不沿用上一轮的任务");
+  assert.equal(plugin.getPomodoroSnapshot().task, null);
+  plugin.onunload();
+});
+
+test("switching tasks closes the running session under the old task", async () => {
+  const { plugin, events } = await pomodoroPlugin({ licensed: false });
+  await plugin.startFocusSession(undefined, { task: TEMPO_TASK });
+  assert.equal(plugin.settings.sessionMeta.plannedMinutes, 25, "不给时长就用设置里的时长");
+  assert.equal(plugin.getPomodoroSnapshot().task.title, "修复转写回链");
+  const other = { source: "crisp-tempo", id: "task-2", title: "写周报" };
+  await plugin.startFocusSession(undefined, { task: other });
+  const [stop, start] = events.slice(-2);
+  assert.equal(stop.type, "stop");
+  assert.equal(stop.task.id, TEMPO_TASK.id);
+  assert.equal(start.type, "start");
+  assert.equal(start.task.id, "task-2");
+  await plugin.startFocusSession(25);
+  assert.equal(events.at(-1).task, null);
+  plugin.onunload();
+});
+
+test("task context from another plugin is validated before it reaches events", async () => {
+  const { plugin, events } = await pomodoroPlugin({ licensed: false });
+  const bad = [
+    "task-1",
+    { source: "Crisp Tempo", id: "task-1", title: "x" },
+    { source: "crisp-tempo", id: "task 1", title: "x" },
+    { source: "crisp-tempo", id: "task-1", title: "   " },
+  ];
+  for (const task of bad) {
+    await plugin.startFocusSession(25, { task });
+    assert.equal(events.at(-1).task, null, JSON.stringify(task));
+  }
+  await plugin.startFocusSession(25, { task: { ...TEMPO_TASK, title: `  ${"长".repeat(300)}\n标题  `, extra: "dropped" } });
+  const task = events.at(-1).task;
+  assert.equal(task.title.length, 200);
+  assert.ok(!task.title.includes("\n"));
+  assert.deepEqual(Object.keys(task).sort(), ["id", "source", "title"]);
+  plugin.onunload();
+});
+
+test("a running task-bound session keeps its task across a reload", async () => {
+  const first = await pomodoroPlugin();
+  await first.plugin.startPomodoro({ task: TEMPO_TASK });
+  first.plugin.onunload();
+  const again = await pomodoroPlugin({ saved: first.persisted() });
+  assert.equal(again.plugin.getPomodoroSnapshot().task.id, TEMPO_TASK.id);
+  await again.plugin.endPomodoro();
+  assert.equal(again.events.at(-1).task.id, TEMPO_TASK.id);
+  again.plugin.onunload();
+});
+
+test("the panel and status bar say which task the session is for", async () => {
+  const { pomodoroViewModel } = loadPluginInternals();
+  const base = { status: "running", remainingMs: 60000, plannedMs: 25 * 60000, kind: "focus", phase: "focus", pomodoro: true, active: true, waiting: false, round: 1, completedRounds: 0, every: 4, focusMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, todayCount: 0, todayFocusMinutes: 0, goal: 8, entitled: true };
+  assert.equal(pomodoroViewModel({ ...base, task: TEMPO_TASK }).task, "修复转写回链");
+  assert.equal(pomodoroViewModel({ ...base, kind: "break", phase: "short-break", task: TEMPO_TASK }).task, "修复转写回链");
+  assert.equal(pomodoroViewModel({ ...base, pomodoro: false, task: TEMPO_TASK }).task, "修复转写回链");
+  assert.equal(pomodoroViewModel({ ...base, task: null }).task, "");
+  assert.equal(pomodoroViewModel({ ...base, status: "idle", active: false, kind: null, task: null }).task, "");
+  const { plugin } = await pomodoroPlugin();
+  await plugin.startPomodoro({ task: TEMPO_TASK });
+  assert.equal(plugin.statusBarEl.title, "修复转写回链 · 打开番茄钟");
+  plugin.onunload();
 });
 
 /* 清爽打字（1.6.0）。失败模式：

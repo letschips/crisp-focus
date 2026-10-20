@@ -60,9 +60,16 @@ chime marks the end of each phase. The pomodoro timer requires a valid Crisp
 license; single focus sessions stay free.
 
 Other plugins can follow sessions through the `crisp-focus:session` workspace
-event (`apiVersion` 1). Each event carries the session id, `kind` (`focus` or
-`break`), `phase`, planned minutes, elapsed time and whether it completed;
-Crisp Pulse uses it to record focus time.
+event (`apiVersion` 2). Each event carries the session id, `kind` (`focus` or
+`break`), `phase`, planned minutes, elapsed time, whether it completed, and
+`task` (`{ source, id, title }` or `null`); Crisp Pulse uses it to record focus
+time.
+
+From `focusApiVersion` 2, `startFocusSession(minutes, { task })` and
+`startPomodoro({ task })` bind a session to a task from another plugin. Crisp
+Tempo uses this to start focus from a task and record the time on it. A pomodoro
+keeps the task for the whole cycle; starting another session ends the running
+one under its own task. The panel shows the task title.
 
 ## License verification and privacy
 

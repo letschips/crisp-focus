@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.0
+
+- 专注和番茄可以绑定一个任务：从 Crisp Tempo 0.4.0 的任务详情开始时，整轮番茄都记在这个任务上，番茄钟面板和状态栏提示显示任务名。换任务开始新的专注时，正在进行的那段按原任务记为中断。
+- 对外事件 `crisp-focus:session` 升到 `apiVersion` 2，新增 `task` 字段（`{ source, id, title }` 或 `null`）；`startFocusSession`、`startPomodoro` 可传 `{ task }`。Crisp Pulse 照常记录专注，不受影响。
+
 ## 1.6.2
 
 - 命令名改为中英双语，命令面板里输入「清爽」「番茄」等中文也能搜到。命令 ID 不变，已设的快捷键照常可用。
