@@ -2162,7 +2162,9 @@ test("the panel and status bar say which task the session is for", async () => {
   assert.equal(pomodoroViewModel({ ...base, status: "idle", active: false, kind: null, task: null }).task, "");
   const { plugin } = await pomodoroPlugin();
   await plugin.startPomodoro({ task: TEMPO_TASK });
-  assert.equal(plugin.statusBarEl.title, "修复转写回链 · 打开番茄钟");
+  assert.equal(plugin.statusBarEl["aria-label"], "修复转写回链 · 打开番茄钟");
+  assert.equal(plugin.statusBarEl["data-tooltip-position"], "top");
+  assert.equal(plugin.statusBarEl.title, "", "不再叠一个系统原生提示");
   plugin.onunload();
 });
 

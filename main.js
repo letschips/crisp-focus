@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.1)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -2640,6 +2640,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.classList.add("crisp-focus-session-status");
     this.statusBarEl.setAttr("aria-label", "Crisp Focus 番茄钟与专注会话");
+    // 状态栏贴着窗口底边，提示框默认朝下放不下，会被挤回来盖住状态栏
+    this.statusBarEl.setAttr("data-tooltip-position", "top");
     // 点状态栏打开番茄钟面板；开始、暂停、跳过休息和结束都在面板里
     this.statusBarEl.addEventListener("click", () => this.togglePomodoroPanel());
     this.focusApiVersion = FOCUS_API_VERSION;
@@ -3036,7 +3038,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.statusBarEl.setText("专注");
     }
     const task = snapshot.status !== "idle" || pomodoro ? focusTaskContext(meta?.task || pomodoro?.task) : null;
-    this.statusBarEl.title = task ? `${task.title} · 打开番茄钟` : "打开番茄钟";
+    // 用 Obsidian 的提示框（能定在上方），不用 title：原生提示会和它叠在一起
+    this.statusBarEl.setAttr("aria-label", task ? `${task.title} · 打开番茄钟` : "打开番茄钟");
   }
 
   /** 状态栏上方弹出的番茄钟面板；再点一次状态栏、点面板外面或按 Esc 关闭。 */
