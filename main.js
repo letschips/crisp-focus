@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.1)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.6.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -2014,7 +2014,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(cleanGroup)
       .setName("进入清爽打字")
-      .setDesc("鼠标移到顶部时显示标签栏；用命令「Toggle clean typing」或这里的开关退出，退出后侧栏恢复原样。")
+      .setDesc("鼠标移到顶部时显示标签栏；用命令「切换清爽打字」或这里的开关退出，退出后侧栏恢复原样。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.cleanTypingActive)
@@ -2097,7 +2097,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     const pomodoroGroup = createGroup(
       "番茄钟",
       this.plugin.licenseManager.isEntitled()
-        ? "专注与休息交替，点状态栏或用命令「Open pomodoro timer」打开。"
+        ? "专注与休息交替，点状态栏或用命令「打开番茄钟」打开。"
         : "需要激活 Crisp Focus。激活后点状态栏或用命令打开。",
       true
     );
@@ -2692,7 +2692,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     // Commands
     this.addCommand({
       id: "toggle-focus-mode",
-      name: "Toggle focus mode",
+      name: "切换专注模式 / Toggle focus mode",
       callback: async () => {
         await this.setFocusModeEnabled(!this.settings.focusModeEnabled);
         new obsidian.Notice(`Crisp Focus 专注模式已${this.settings.focusModeEnabled ? "开启" : "关闭"}`);
@@ -2701,7 +2701,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "toggle-animated-cursor",
-      name: "Toggle animated cursor",
+      name: "切换动效光标 / Toggle animated cursor",
       callback: async () => {
         await this.setAnimatedCursorEnabled(!this.settings.animatedCursorEnabled);
         new obsidian.Notice(`Crisp Focus 动效光标已${this.settings.animatedCursorEnabled ? "开启" : "关闭"}`);
@@ -2710,7 +2710,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "toggle-typewriter-scroll",
-      name: "Toggle typewriter scrolling",
+      name: "切换打字机定焦 / Toggle typewriter scrolling",
       callback: async () => {
         if (await this.setTypewriterScrollEnabled(!this.settings.typewriterScrollEnabled) === false) return;
         new obsidian.Notice(`Crisp Focus 打字机定焦已${this.settings.typewriterScrollEnabled ? "开启" : "关闭"}`);
@@ -2719,7 +2719,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "toggle-typewriter-mode",
-      name: "Toggle typewriter mode (Soft / Strict)",
+      name: "切换定焦模式（平滑/严格） / Toggle typewriter mode (Soft/Strict)",
       callback: async () => {
         const newMode = this.settings.typewriterScrollMode === "soft" ? "strict" : "soft";
         await this.setTypewriterScrollMode(newMode);
@@ -2729,7 +2729,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "toggle-typewriter-audio",
-      name: "Toggle sound effects",
+      name: "切换打字音效 / Toggle sound effects",
       callback: async () => {
         if (!this.settings.typewriterAudioEnabled && !this.licenseManager.isEntitled()) {
           new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
@@ -2744,7 +2744,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "toggle-clean-typing",
-      name: "Toggle clean typing",
+      name: "切换清爽打字 / Toggle clean typing",
       callback: () => {
         if (this.setCleanTypingEnabled(!this.cleanTypingActive)) {
           new obsidian.Notice(`Crisp Focus 清爽打字已${this.cleanTypingActive ? "开启" : "关闭"}`);
@@ -2755,7 +2755,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     Object.entries(FOCUS_SCENES).forEach(([sceneId, scene]) => {
       this.addCommand({
         id: `apply-scene-${sceneId}`,
-        name: `Apply scene: ${scene.name}`,
+        name: `应用场景 / Apply scene: ${scene.name}`,
         callback: async () => {
           const result = await this.applyScene(sceneId);
           if (result.applied) {
@@ -2769,17 +2769,17 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "open-pomodoro",
-      name: "Open pomodoro timer",
+      name: "打开番茄钟 / Open pomodoro timer",
       callback: () => this.openPomodoroModal(),
     });
     this.addCommand({
       id: "start-pomodoro",
-      name: "Start pomodoro",
+      name: "开始番茄 / Start pomodoro",
       callback: () => this.startPomodoro(),
     });
     this.addCommand({
       id: "skip-pomodoro-break",
-      name: "Skip pomodoro break",
+      name: "跳过休息 / Skip pomodoro break",
       callback: () => {
         if (this.settings.sessionMeta?.kind !== "break") {
           new obsidian.Notice("现在不是番茄钟的休息时间");
@@ -2791,17 +2791,17 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     this.addCommand({
       id: "start-focus-session-25",
-      name: "Start 25-minute focus session",
+      name: "开始 25 分钟专注 / Start 25-minute focus session",
       callback: () => this.startFocusSession(25),
     });
     this.addCommand({
       id: "start-focus-session-50",
-      name: "Start 50-minute focus session",
+      name: "开始 50 分钟专注 / Start 50-minute focus session",
       callback: () => this.startFocusSession(50),
     });
     this.addCommand({
       id: "pause-resume-focus-session",
-      name: "Pause or resume focus session",
+      name: "暂停或继续专注 / Pause or resume focus session",
       callback: () => {
         const status = this.session.getSnapshot().status;
         if (status === "running") return this.pauseFocusSession();
@@ -2811,7 +2811,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     });
     this.addCommand({
       id: "stop-focus-session",
-      name: "Stop focus session",
+      name: "结束专注 / Stop focus session",
       callback: () => {
         if (this.session.getSnapshot().status === "idle") {
           new obsidian.Notice("当前没有进行中的专注会话");
