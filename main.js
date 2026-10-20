@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1761,6 +1761,9 @@ function pomodoroPhaseViewModel(snap, now) {
     actions: [{ id: "start", label: "开始番茄", primary: true }, { id: "single", label: "单次专注" }] };
 }
 
+const POMO_RING_RADIUS = 46;
+const POMO_RING_LENGTH = 2 * Math.PI * POMO_RING_RADIUS;
+
 /* 番茄钟面板：桌面端从状态栏弹出，手机端和命令面板用对话框。每秒只更新数字、进度和当前番茄位；
    状态或按钮变了才重建。 */
 class PomodoroPanelView {
@@ -1783,7 +1786,8 @@ class PomodoroPanelView {
     }
     this.timeEl.setText(vm.time);
     this.subEl.setText(vm.sub);
-    this.barEl.style.width = `${(vm.progress * 100).toFixed(2)}%`;
+    this.ringEl.style.strokeDashoffset = (POMO_RING_LENGTH * (1 - vm.progress)).toFixed(2);
+    this.ringEl.toggleClass("is-empty", vm.progress <= 0);
     vm.slots.forEach((slot, i) => this.slotEls[i]?.style.setProperty("--p", String(slot.p)));
   }
 
@@ -1793,13 +1797,20 @@ class PomodoroPanelView {
     root.dataset.state = vm.state;
     root.dataset.tone = vm.tone;
     root.toggleClass("is-paused", !!vm.paused);
-    this.barEl = root.createDiv({ cls: "crisp-focus-pomo__bar" }).createDiv({ cls: "crisp-focus-pomo__bar-fill" });
     const head = root.createDiv({ cls: "crisp-focus-pomo__head" });
     head.createSpan({ cls: "crisp-focus-pomo__pill", text: vm.pill });
     if (vm.meta) head.createSpan({ cls: "crisp-focus-pomo__meta", text: vm.meta });
     if (vm.task) root.createDiv({ cls: "crisp-focus-pomo__task", text: vm.task, attr: { title: vm.task } });
-    this.timeEl = root.createDiv({ cls: "crisp-focus-pomo__time", attr: { role: "timer", "aria-live": "off" } });
-    this.subEl = root.createDiv({ cls: "crisp-focus-pomo__sub" });
+    // 进度环：从 12 点方向顺时针走完一圈；时间和结束时刻放在环里
+    const dial = root.createDiv({ cls: "crisp-focus-pomo__dial" });
+    const svg = dial.createSvg("svg", { cls: "crisp-focus-pomo__ring", attr: { viewBox: "0 0 100 100", "aria-hidden": "true" } });
+    svg.createSvg("circle", { cls: "crisp-focus-pomo__ring-track", attr: { cx: 50, cy: 50, r: POMO_RING_RADIUS } });
+    this.ringEl = svg.createSvg("circle", { cls: "crisp-focus-pomo__ring-fill", attr: { cx: 50, cy: 50, r: POMO_RING_RADIUS, "stroke-dasharray": POMO_RING_LENGTH.toFixed(2) } });
+    const face = dial.createDiv({ cls: "crisp-focus-pomo__face" });
+    this.timeEl = face.createDiv({ cls: "crisp-focus-pomo__time", attr: { role: "timer", "aria-live": "off" } });
+    // 计时中环里放结束时刻；没在计时时说明文字较长（番茄设置、激活提示），放到环下面
+    const resting = vm.state === "idle" || vm.state === "locked" || vm.state === "waiting";
+    this.subEl = (resting ? root : face).createDiv({ cls: "crisp-focus-pomo__sub" });
     const slots = root.createDiv({ cls: "crisp-focus-pomo__slots", attr: { "aria-hidden": "true" } });
     this.slotEls = vm.slots.map((slot) => slots.createSpan({ cls: `crisp-focus-pomo__slot is-${slot.state}` }));
     if (!vm.slots.length) slots.addClass("is-empty");
@@ -3076,6 +3087,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
       modal.modalEl.addClass("crisp-focus-pomo-modal");
       view = new PomodoroPanelView(this, modal.contentEl);
       (this.pomodoroViews ||= new Set()).add(view);
+      // Obsidian 打开对话框时把焦点给第一个按钮，从命令面板打开会画出焦点框，像是已经选中了「暂停」。
+      // 焦点放在对话框本身：Esc 照常关闭，按 Tab 再进入按钮。
+      window.setTimeout(() => {
+        if (!modal.modalEl.isConnected) return;
+        modal.modalEl.tabIndex = -1;
+        modal.modalEl.focus({ preventScroll: true });
+      }, 0);
     };
     modal.onClose = () => {
       this.pomodoroViews?.delete(view);
