@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.3)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1949,7 +1949,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(containerEl)
       .setName("专注模式")
-      .setDesc("动效光标、打字机定焦、打字音效与环境音的总体开关。")
+      .setDesc("光标、定焦、音效与环境音的总开关")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.focusModeEnabled)
@@ -2007,13 +2007,13 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const sceneGroup = createGroup(
       "专注场景",
-      "一键同步光标、定焦、打字反馈与环境音组合。",
+      "",
       true
     );
 
     new obsidian.Setting(sceneGroup)
       .setName("当前场景")
-      .setDesc("静默写作免费可用，其中的打字机定焦需要激活；包含音效的场景需要激活。")
+      .setDesc(this.plugin.licenseManager.isEntitled() ? "" : "打字机定焦和带音效的场景需要激活")
       .addDropdown((dropdown) => {
         dropdown.addOption("custom", "自定义（当前设置）");
         Object.entries(FOCUS_SCENES).forEach(([sceneId, scene]) => {
@@ -2036,15 +2036,13 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const cleanGroup = createGroup(
       "清爽打字",
-      this.plugin.licenseManager.isEntitled()
-        ? "收起两侧栏，隐藏标签栏、标题栏和功能区，只留下正文。"
-        : "需要激活 Crisp Focus。激活后收起两侧栏和界面元素，只留下正文。",
+      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
       true
     );
 
     new obsidian.Setting(cleanGroup)
       .setName("进入清爽打字")
-      .setDesc("鼠标移到顶部时显示标签栏；用命令「切换清爽打字」或这里的开关退出，退出后侧栏恢复原样。")
+      .setDesc("鼠标移到顶部显示标签栏")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.cleanTypingActive)
@@ -2055,7 +2053,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(cleanGroup)
       .setName("同时隐藏状态栏")
-      .setDesc("关闭后状态栏照常显示，方便看番茄钟倒计时。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.cleanTypingHideStatusBar !== false)
@@ -2066,14 +2063,14 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const sessionGroup = createGroup(
       "专注会话",
-      "用状态栏倒计时完成一段有边界的写作时间。",
+      "",
       true
     );
     const sessionSnapshot = this.plugin.session.getSnapshot();
 
     new obsidian.Setting(sessionGroup)
       .setName("默认时长")
-      .setDesc("设置 1–240 分钟；命令面板另提供 25 与 50 分钟快捷入口。")
+      .setDesc("1–240 分钟")
       .addText((text) => {
         text.inputEl.type = "number";
         text.inputEl.min = "1";
@@ -2096,7 +2093,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     this.sessionControlSetting = new obsidian.Setting(sessionGroup)
       .setName("会话控制")
       .setDesc(sessionSnapshot.status === "idle"
-        ? "当前没有进行中的会话。"
+        ? ""
         : `剩余 ${formatSessionRemaining(sessionSnapshot.remainingMs)}`)
       .addButton((button) => button
         .setButtonText(sessionSnapshot.status === "idle" ? "开始" : "重新开始")
@@ -2126,9 +2123,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const pomodoroGroup = createGroup(
       "番茄钟",
-      this.plugin.licenseManager.isEntitled()
-        ? "专注与休息交替，点状态栏或用命令「打开番茄钟」打开。"
-        : "需要激活 Crisp Focus。激活后点状态栏或用命令打开。",
+      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
       true
     );
     const numberSetting = (name, desc, key, fallback, min, max) => new obsidian.Setting(pomodoroGroup)
@@ -2146,21 +2141,20 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         });
         text.inputEl.addEventListener("blur", () => text.setValue(String(this.plugin.settings[key] ?? fallback)));
       });
-    numberSetting("专注时长", "每个番茄的专注分钟数，1–240。", "pomodoroFocusMinutes", 25, 1, 240);
-    numberSetting("短休", "每个番茄之后的休息分钟数，1–60。", "pomodoroShortBreakMinutes", 5, 1, 60);
-    numberSetting("长休", "每组番茄之后的休息分钟数，1–90。", "pomodoroLongBreakMinutes", 15, 1, 90);
-    numberSetting("每组几个", "完成几个番茄后换成长休，2–12。", "pomodoroLongBreakEvery", 4, 2, 12);
-    numberSetting("每日目标", "面板底部显示今天完成了几个，1–24。", "pomodoroDailyGoal", 8, 1, 24);
+    numberSetting("专注时长", "1–240 分钟", "pomodoroFocusMinutes", 25, 1, 240);
+    numberSetting("短休", "1–60 分钟", "pomodoroShortBreakMinutes", 5, 1, 60);
+    numberSetting("长休", "1–90 分钟", "pomodoroLongBreakMinutes", 15, 1, 90);
+    numberSetting("每组几个", "几个番茄后换长休", "pomodoroLongBreakEvery", 4, 2, 12);
+    numberSetting("每日目标", "1–24 个", "pomodoroDailyGoal", 8, 1, 24);
     new obsidian.Setting(pomodoroGroup)
       .setName("休息结束自动开始下一个")
-      .setDesc("关闭时，休息结束后等你点「开始下一个」。")
       .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.pomodoroAutoStartFocus).onChange(async (value) => {
         this.plugin.settings.pomodoroAutoStartFocus = value;
         await this.plugin.saveSettings();
       }));
     new obsidian.Setting(pomodoroGroup)
       .setName("阶段提示音")
-      .setDesc("专注结束和休息结束时轻响两声，不受打字音效开关影响。")
+      .setDesc("不受打字音效开关影响")
       .addButton((button) => button.setButtonText("试听").onClick(() => this.plugin.audio?.playChime("focus-end")))
       .addToggle((toggle) => toggle.setValue(this.plugin.settings.pomodoroChime !== false).onChange(async (value) => {
         this.plugin.settings.pomodoroChime = value;
@@ -2172,7 +2166,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const licenseGroup = createGroup(
       "软件授权",
-      "本地 Ed25519 签名验证与在线设备校验，支持离线使用",
+      "",
       true
     );
 
@@ -2191,7 +2185,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     } else if (this.plugin.settings.licenseCode) {
       statusSetting.setDesc(`❌ 未激活（${licenseStatus.reason || "授权码无效"}）`);
     } else {
-      statusSetting.setDesc("❌ 未激活（可免费使用动效光标与单次专注，激活后解锁打字机定焦、清爽打字、番茄钟、打字音效与 HD 环境音）");
+      statusSetting.setDesc("❌ 未激活");
     }
 
     new obsidian.Setting(licenseGroup)
@@ -2229,13 +2223,12 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 1: Smooth Animated Cursor
     const cursorCard = createGroup(
       "动效光标",
-      "设置光标的弹簧移动、过渡速度与闪烁节奏。",
+      "",
       true
     );
 
     new obsidian.Setting(cursorCard)
       .setName("启用动效光标")
-      .setDesc("光标在文字、换行与选区之间平滑移动。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.animatedCursorEnabled)
@@ -2244,7 +2237,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    const speedDesc = (val) => `每次光标移动的过渡速度：${val} 毫秒。`;
+    const speedDesc = () => "毫秒";
     const speedSetting = new obsidian.Setting(cursorCard)
       .setName("光标速度")
       .setDesc(speedDesc(this.plugin.settings.cursorSpeed ?? 80))
@@ -2272,7 +2265,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    const blinkRateDesc = (val) => `光标完整闪烁一次的周期：${val} 毫秒。`;
+    const blinkRateDesc = () => "闪烁一次的毫秒数";
     const blinkRateSetting = new obsidian.Setting(cursorCard)
       .setName("闪烁频率")
       .setDesc(blinkRateDesc(this.plugin.settings.blinkRate ?? 1000))
@@ -2300,7 +2293,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    const blinkCountDesc = (val) => `一次连续闪烁上限：${val} 次（设为 0 时保持常亮）。`;
+    const blinkCountDesc = () => "0 为常亮";
     const blinkCountSetting = new obsidian.Setting(cursorCard)
       .setName("闪烁次数")
       .setDesc(blinkCountDesc(this.plugin.settings.blinkCount ?? 10))
@@ -2331,15 +2324,12 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 2: Typewriter Scrolling Engine
     const typewriterCard = createGroup(
       "打字机定焦",
-      this.plugin.licenseManager.isEntitled()
-        ? "书写时让当前输入行回到舒适的黄金视线高度。"
-        : "需要激活 Crisp Focus。激活后书写时让当前输入行回到舒适的黄金视线高度。",
+      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
       true
     );
 
     new obsidian.Setting(typewriterCard)
       .setName("启用打字机定焦")
-      .setDesc("光标移动或文字输入时，视口自动跟随保持舒适高度。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterScrollEnabled)
@@ -2351,7 +2341,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(typewriterCard)
       .setName("滚动模式")
-      .setDesc("平滑区间模式在舒适带内自由移动，出界时平滑推回；严格定焦模式每行都精确锁定在黄金高度。")
+      .setDesc("平滑区间在舒适带内移动，严格定焦每行锁定")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("soft", "🌊 平滑区间 (Soft Mode · 推荐)")
@@ -2363,11 +2353,11 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
-    const offsetDesc = (val) => `当前光标定焦位置：屏幕高度的 ${val}%。`;
+    const offsetDesc = () => "屏幕高度的百分比";
     const toleranceDesc = () => {
       const offset = this.plugin.settings.typewriterScrollOffset ?? 42;
       const tolerance = this.plugin.settings.typewriterScrollTolerance ?? 10;
-      return `光标自由活动范围：±${tolerance}%（即 ${Math.max(0, offset - tolerance)}% ~ ${Math.min(100, offset + tolerance)}%）。`;
+      return `光标在 ${Math.max(0, offset - tolerance)}%–${Math.min(100, offset + tolerance)}% 之间移动`;
     };
     let toleranceSetting = null;
     const offsetSetting = new obsidian.Setting(typewriterCard)
@@ -2421,7 +2411,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(typewriterCard)
       .setName("底部留白扩展")
-      .setDesc("按当前编辑器窗格高度补足末尾留白；分屏或小窗里也不会留下过大的空白。")
+      .setDesc("按窗格高度补足末尾留白")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterScrollBottomPadding)
@@ -2432,7 +2422,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(typewriterCard)
       .setName("平滑缓动滚动")
-      .setDesc("视口调整时使用柔和平滑的滚动过渡动画。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterScrollSmooth)
@@ -2444,13 +2433,12 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 3: Multi-Theme Audio Engine
     const audioCard = createGroup(
       "声音反馈",
-      "选择有触感的按键音主题，并可启用回车提示音。",
+      "",
       false
     );
 
     new obsidian.Setting(audioCard)
       .setName("启用音效")
-      .setDesc("打字时播放触感按键与确认音反馈。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterAudioEnabled)
@@ -2470,7 +2458,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(audioCard)
       .setName("音效主题")
-      .setDesc("选择按键反馈的预设音色。")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("typewriter", "📜 Vintage Typewriter (复古打字机)")
@@ -2494,7 +2481,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(audioCard)
       .setName("主音量")
-      .setDesc("调节按键与确认音的整体音量。")
       .addSlider((slider) =>
         slider
           .setLimits(0, 1, 0.05)
@@ -2510,7 +2496,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(audioCard)
       .setName("空格与选字提示音")
-      .setDesc("空格键或输入法确认选字时播放提示音；关闭后不影响普通打字和回车音效。")
+      .setDesc("输入法确认选字也算")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterSpaceEnabled)
@@ -2522,7 +2508,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(audioCard)
       .setName("回车提示音")
-      .setDesc("按 Enter 时播放铃声或提示音。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.typewriterBellEnabled)
@@ -2536,13 +2521,12 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 3: Zen Ambient Audio Generator
     const ambientCard = createGroup(
       "环境音",
-      "在专注模式开启时循环播放本地环境音。",
+      "",
       false
     );
 
     new obsidian.Setting(ambientCard)
       .setName("背景环境音")
-      .setDesc("选择高清背景环境音。")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("off", "Off (关闭)")
@@ -2568,7 +2552,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(ambientCard)
       .setName("环境音音量")
-      .setDesc("调节背景环境音音量。")
       .addSlider((slider) =>
         slider
           .setLimits(0, 1, 0.05)
