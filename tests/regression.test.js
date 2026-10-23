@@ -308,7 +308,12 @@ function createObsidianMock(options = {}) {
   }
   return {
     MarkdownView: class MarkdownView {},
-    Notice: class Notice {},
+    ...(options.Modal ? { Modal: options.Modal } : {}),
+    Notice: class Notice {
+      constructor(message) {
+        options.notices?.push(message);
+      }
+    },
     Platform: { isMobile: !!options.mobile },
     Plugin,
     PluginSettingTab: class PluginSettingTab {},
@@ -2763,4 +2768,167 @@ test("clean typing hides the view header only in writing views", () => {
       assert.match(selector, /data-type="markdown"/, `view header rule must be scoped: ${selector.trim()}`);
     }
   }
+});
+
+/* 2026-10-23 审计（1.8.1）。失败模式：
+   - saveData() 吞掉写盘错误：设置没落盘，界面仍说切换成功。
+   - 继续操作写盘慢，期间换了新会话：旧的「继续」事件发给了新会话；重复点击发出重复的暂停/继续。
+   - 命令打开的番茄钟对话框在插件卸载后还留着。
+   - 长按字符键：自动重复的 keydown 之后，beforeinput 又被当成屏幕键盘输入响一声。
+   - 环境音加载中途停止，解码完又把几十 MB 的缓存写回去。 */
+test("a save that never reaches data.json is reported instead of passing as success", async () => {
+  const notices = [];
+  const { CrispFocusPlugin } = loadPluginInternals({ notices });
+  const { windowObject } = createWindow();
+  const files = new Map([[DATA_PATH, '{"ambientSound":"rain"}']]);
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files).app;
+  plugin.loadData = async () => ({ ambientSound: "rain" });
+  plugin.saveData = async () => {}; // Obsidian 的 writeJson 吞掉写入异常后就是这样
+  await plugin.onload();
+  try {
+    const result = await plugin.applyScene("silent-writing");
+    assert.equal(result.applied, true);
+    assert.equal(result.saved, false);
+    assert.equal(notices.filter((n) => String(n).includes("没能写入")).length, 1);
+    assert.equal(await plugin.saveSettings(), false);
+    assert.equal(notices.filter((n) => String(n).includes("没能写入")).length, 1, "one notice per failure streak");
+
+    plugin.saveData = async (value) => { files.set(DATA_PATH, JSON.stringify(value, null, 2)); };
+    assert.equal(await plugin.saveSettings(), true);
+    assert.equal(plugin.settingsSaveFailed, false);
+    assert.equal(JSON.parse(files.get(DATA_PATH)).activeSceneId, "silent-writing");
+  } finally { plugin.onunload(); }
+});
+
+test("concurrent saves verify against the newest write, not each other", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const files = new Map([[DATA_PATH, "{}"]]);
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createDataFileApp(windowObject, files).app;
+  plugin.loadData = async () => ({});
+  plugin.saveData = async (value) => { files.set(DATA_PATH, JSON.stringify(value, null, 2)); };
+  await plugin.onload();
+  try {
+    plugin.settings.typewriterVolume = 0.3;
+    const first = plugin.saveSettings();
+    plugin.settings.typewriterVolume = 0.4;
+    const second = plugin.saveSettings();
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.equal(plugin.settingsSaveFailed, false);
+  } finally { plugin.onunload(); }
+});
+
+test("a resume finishing after a new session started never reports a resume for it", async () => {
+  const { plugin, events } = await pomodoroPlugin();
+  try {
+    await plugin.startFocusSession(25);
+    const firstId = plugin.settings.sessionMeta.id;
+    await plugin.pauseFocusSession();
+    const release = blockNextSave(plugin);
+    const resuming = plugin.resumeFocusSession();
+    await plugin.startFocusSession(50);
+    release();
+    await resuming;
+    await new Promise((r) => setImmediate(r));
+
+    const secondId = plugin.settings.sessionMeta.id;
+    assert.notEqual(secondId, firstId);
+    assert.deepEqual(events.filter((e) => e.id === secondId).map((e) => e.type), ["start"]);
+    assert.deepEqual(events.filter((e) => e.id === firstId).map((e) => e.type), ["start", "pause", "resume", "stop"]);
+    assert.equal(Math.round(plugin.session.getSnapshot().remainingMs / 60000), 50);
+  } finally { plugin.onunload(); }
+});
+
+test("repeated pause and resume requests report each transition once", async () => {
+  const { plugin, events } = await pomodoroPlugin();
+  try {
+    await plugin.startFocusSession(25);
+    await Promise.all([plugin.pauseFocusSession(), plugin.pauseFocusSession()]);
+    await Promise.all([plugin.resumeFocusSession(), plugin.resumeFocusSession()]);
+    assert.deepEqual(events.map((e) => e.type), ["start", "pause", "resume"]);
+  } finally { plugin.onunload(); }
+});
+
+test("unloading the plugin closes a pomodoro dialog opened from the command palette", async () => {
+  const modals = [];
+  class Modal {
+    constructor(app) {
+      this.app = app;
+      this.contentEl = { empty() {} };
+      this.modalEl = { isConnected: false, addClass() {} };
+      modals.push(this);
+    }
+    open() { this.isOpen = true; }
+    close() {
+      if (!this.isOpen) return;
+      this.isOpen = false;
+      this.onClose?.();
+    }
+  }
+  const { CrispFocusPlugin } = loadPluginInternals({ Modal });
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({});
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  plugin.openPomodoroModal();
+  plugin.openPomodoroModal();
+  modals[0].close(); // 用户自己关掉的那个不再被记着
+  assert.equal(plugin.pomodoroModals.size, 1);
+  plugin.onunload();
+  assert.equal(modals[1].isOpen, false);
+  assert.equal(plugin.pomodoroModals.size, 0);
+});
+
+test("a held character key sounds once even when beforeinput follows each repeat", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ typewriterAudioEnabled: true });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  try {
+    const played = [];
+    plugin.audio.playCharKey = () => played.push("char");
+    const key = (repeat) => windowObject.dispatch("keydown", { altKey: false, ctrlKey: false, metaKey: false, key: "a", repeat });
+    const input = () => windowObject.dispatch("beforeinput", { inputType: "insertText", data: "a" });
+
+    key(false);
+    input();
+    await new Promise((r) => setTimeout(r, 120)); // 超过 beforeinput 的 80ms 去重窗口
+    key(true);
+    input();
+    await new Promise((r) => setTimeout(r, 120));
+    key(true);
+    input();
+
+    assert.deepEqual(played, ["char"]);
+  } finally { plugin.onunload(); }
+});
+
+test("stopping ambient while it is still loading leaves no decoded buffer behind", async () => {
+  const state = { sound: "rain", volume: 0.6 };
+  const { app, context, engine } = createAmbientEngine(state);
+  let release;
+  const read = app.vault.adapter.readBinary.bind(app.vault.adapter);
+  app.vault.adapter.readBinary = async (p) => {
+    await new Promise((resolve) => { release = resolve; });
+    return read(p);
+  };
+
+  const loading = engine.updateAmbient();
+  engine.stopAmbient();
+  release();
+  await loading;
+  await settleAudio();
+
+  assert.equal(engine.ambientBuffer, null);
+  assert.equal(context.ambientSources.length, 0);
+  assert.equal(context.calls.bufferCreations, 0, "a stale load does not build the loop copy");
 });

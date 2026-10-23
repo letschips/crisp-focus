@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.8.1)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.8.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -717,9 +717,9 @@ class CrispFocusAudioEngine {
     this.fadeOutAmbient();
     const request = ++this.ambientRequest;
     this.ambientPending = soundName;
-    this.ambientLoad = this.loadAmbientBuffer(soundName)
+    this.ambientLoad = this.loadAmbientBuffer(soundName, request)
       .then((buffer) => {
-        if (request !== this.ambientRequest || !this.ctx) return;
+        if (!buffer || request !== this.ambientRequest || !this.ctx) return;
         this.ambientPending = null;
         this.ambientLoad = null;
         this.startAmbient(soundName, buffer);
@@ -734,13 +734,18 @@ class CrispFocusAudioEngine {
     return this.ambientLoad;
   }
 
-  async loadAmbientBuffer(soundName) {
+  /* request：发起加载时的 ambientRequest。期间被停止或换了声音就返回 null，
+     不再解码、不建循环副本，也不把几十 MB 的缓存写回去。 */
+  async loadAmbientBuffer(soundName, request = this.ambientRequest) {
     if (this.ambientBuffer?.name === soundName) return this.ambientBuffer.buffer;
     const configDir = this.app.vault.configDir || ".obsidian";
     const data = await this.app.vault.adapter.readBinary(`${configDir}/plugins/crisp-focus/audio/${soundName}.mp3`);
     const ctx = this.ctx;
+    if (request !== this.ambientRequest) return null;
     if (!ctx) throw new Error("Audio context closed while loading ambient sound");
-    const buffer = buildAmbientLoop(ctx, await ctx.decodeAudioData(data));
+    const decoded = await ctx.decodeAudioData(data);
+    if (request !== this.ambientRequest || this.ctx !== ctx) return null;
+    const buffer = buildAmbientLoop(ctx, decoded);
     this.ambientBuffer = { name: soundName, buffer };
     return buffer;
   }
@@ -2020,7 +2025,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
               this.display();
               return;
             }
-            new obsidian.Notice(`Crisp Focus 已切换到“${result.scene.name}”`);
+            new obsidian.Notice(`Crisp Focus 已切换到“${result.scene.name}”${result.saved ? "" : "，但没能保存"}`);
             this.display();
           });
       });
@@ -2765,7 +2770,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
         callback: async () => {
           const result = await this.applyScene(sceneId);
           if (result.applied) {
-            new obsidian.Notice(`Crisp Focus 已切换到“${scene.name}”`);
+            new obsidian.Notice(`Crisp Focus 已切换到“${scene.name}”${result.saved ? "" : "，但没能保存"}`);
           } else {
             new obsidian.Notice(`🔒 ${result.reason}`);
           }
@@ -2858,12 +2863,40 @@ class CrispFocusPlugin extends obsidian.Plugin {
     }
     this.licenseManager?.destroy();
     this.closePomodoroPanel?.();
+    this.closePomodoroModals();
   }
 
+  // Obsidian's saveData() swallows write errors, so a save only counts once data.json reads back
+  // as what was written. Returns whether the settings are on disk.
   async saveSettings() {
     // A damaged data.json we could not back up must never be overwritten.
-    if (this.settingsWriteBlocked) return;
-    await this.saveData(this.settings);
+    if (this.settingsWriteBlocked) return false;
+    const payload = JSON.stringify(this.settings);
+    this.latestSettingsPayload = payload;
+    let saved = false;
+    try {
+      await this.saveData(this.settings);
+      saved = await this.settingsOnDiskMatch(payload);
+    } catch (error) {
+      console.error("[Crisp Focus] Could not save settings", error);
+    }
+    if (!saved) {
+      if (!this.settingsSaveFailed) {
+        new obsidian.Notice("Crisp Focus 的设置没能写入磁盘，重启后可能恢复原样。请检查磁盘空间或同步状态，之后的改动会再次尝试保存。", 12000);
+      }
+      this.settingsSaveFailed = true;
+      return false;
+    }
+    this.settingsSaveFailed = false;
+    return true;
+  }
+
+  async settingsOnDiskMatch(payload) {
+    const adapter = this.app?.vault?.adapter;
+    if (typeof adapter?.read !== "function") return true;
+    const onDisk = JSON.stringify(JSON.parse(await adapter.read(this.getDataFilePath())));
+    // Saves overlap (many callers do not wait), so a newer write already on disk confirms this one too.
+    return onDisk === payload || onDisk === this.latestSettingsPayload || onDisk === JSON.stringify(this.settings);
   }
 
   getDataFilePath() {
@@ -2961,7 +2994,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     }
 
     Object.assign(this.settings, scene.settings, { activeSceneId: sceneId });
-    await this.saveSettings();
+    const saved = await this.saveSettings();
     if (this.audio) {
       this.audio.updateAmbient();
     }
@@ -2973,7 +3006,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (activeLeaf && activeLeaf.editor && activeLeaf.editor.cm) {
       this.typewriterEngine?.requestScroll(activeLeaf.editor.cm, "scene-change");
     }
-    return { applied: true, scene };
+    return { applied: true, saved, scene };
   }
 
   markSceneCustom() {
@@ -3073,11 +3106,19 @@ class CrispFocusPlugin extends obsidian.Plugin {
       }, 0);
     };
     modal.onClose = () => {
+      this.pomodoroModals?.delete(modal);
       this.pomodoroViews?.delete(view);
       view?.destroy();
       modal.contentEl.empty();
     };
+    (this.pomodoroModals ||= new Set()).add(modal);
     modal.open();
+  }
+
+  closePomodoroModals() {
+    // close() 才会移除宿主的遮罩；onClose 会把自己从集合里删掉，先拷一份
+    Array.from(this.pomodoroModals || []).forEach((modal) => modal.close());
+    this.pomodoroModals?.clear();
   }
 
   get pomodoroView() {
@@ -3298,8 +3339,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async pauseFocusSession() {
+    const wasRunning = this.session.getSnapshot().status === "running";
     const snapshot = this.session.pause();
-    if (snapshot.status === "paused") {
+    if (wasRunning && snapshot.status === "paused") {
       this.audio?.stopAmbient();
       this.emitSessionEvent("pause", { elapsedMs: this.elapsedMs() });
     }
@@ -3308,11 +3350,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async resumeFocusSession() {
+    const wasPaused = this.session.getSnapshot().status === "paused";
     const snapshot = this.session.resume();
-    if (snapshot.status === "running") {
+    if (wasPaused && snapshot.status === "running") {
+      // 事件先于写盘发出：写盘期间换成了新会话，这次继续也只记在原来那段上
+      this.emitSessionEvent("resume");
       if (this.settings.sessionMeta?.kind !== "break") await this.setFocusModeEnabled(true);
       this.audio.updateAmbient();
-      this.emitSessionEvent("resume");
     }
     await this.saveSettings();
     return snapshot;
@@ -3433,6 +3477,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       const key = evt.key;
       // 长按自动重复：真键盘按住只响一下，只有连删保留一串轻响，提示还在删
       if (evt.repeat) {
+        // 自动重复的字符键后面照样跟着 beforeinput：记下这一下，免得它被当成屏幕键盘输入再响
+        if (key.length === 1) state.lastCharKeydownAt = Date.now();
         if (key !== "Backspace" && key !== "Delete") return;
         const now = Date.now();
         if (now - state.lastRepeatAt < 70) return;

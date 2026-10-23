@@ -1,6 +1,6 @@
 {
   "name": "crisp-focus",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "private": true,
   "scripts": {
     "check": "node --check main.js && npm test",
