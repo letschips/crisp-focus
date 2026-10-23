@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.7.3)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.8.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -275,6 +275,184 @@ function around(target, patches) {
 // --------------------------------------------------------------------------
 // 1. Multi-Theme WebAudio Keypress & HD Local MP3 Ambient Audio Engine
 // --------------------------------------------------------------------------
+/* 环境音素材首尾自带淡入淡出（风声结尾约 2.75 秒），雨声首尾也接不上。
+   循环时跳过这两段，再把尾巴交叉淡化进开头，拼成一段首尾相接的 buffer。 */
+const AMBIENT_LOOP_HEAD = 0.75;
+const AMBIENT_LOOP_TAIL = 3;
+const AMBIENT_CROSSFADE = 4;
+const AMBIENT_FADE_IN = 1.5;
+const AMBIENT_FADE_OUT = 0.8;
+
+function buildAmbientLoop(ctx, source) {
+  const rate = source.sampleRate;
+  const head = Math.round(AMBIENT_LOOP_HEAD * rate);
+  const fade = Math.round(AMBIENT_CROSSFADE * rate);
+  const region = source.length - head - Math.round(AMBIENT_LOOP_TAIL * rate);
+  if (region <= fade * 2) return source;
+
+  const length = region - fade;
+  const loop = ctx.createBuffer(source.numberOfChannels, length, rate);
+  for (let channel = 0; channel < source.numberOfChannels; channel++) {
+    const input = source.getChannelData(channel).subarray(head, head + region);
+    const output = loop.getChannelData(channel);
+    output.set(input.subarray(0, length));
+    // 等功率交叉淡化：噪声类素材叠加时响度不塌
+    for (let i = 0; i < fade; i++) {
+      const angle = ((i + 0.5) / fade) * Math.PI / 2;
+      output[i] = input[i] * Math.sin(angle) + input[length + i] * Math.cos(angle);
+    }
+  }
+  return loop;
+}
+
+/* 打字音效：每个按键由几层声音叠成，大致是「敲击瞬态 + 键体 + 共鸣」。
+   noise 层是滤波后的白噪声，tone 层是振荡器；decay 是衰减到 -60dB 的时间。
+   每次按下随机微调力度、音高和滤波，避免一串字听起来一模一样。 */
+const RETRO_NOTES = [1046.5, 1174.66, 1318.51, 1567.98, 1760];
+const TYPING_SOUNDS = {
+  typewriter: {
+    gain: 1,
+    jitter: 0.05,
+    bell: "bell",
+    char: [
+      { noise: "bandpass", freq: 3800, q: 0.8, level: 0.35, decay: 0.008 },
+      { noise: "bandpass", freq: 1500, q: 1.4, level: 0.9, decay: 0.035 },
+      { tone: "sine", freq: 190, to: 130, level: 0.3, decay: 0.04 },
+    ],
+    // 中文每次空格选字都会响，比字符键略沉一点即可，低频别轰
+    space: [
+      { noise: "bandpass", freq: 2800, q: 0.8, level: 0.32, decay: 0.008 },
+      { noise: "bandpass", freq: 900, q: 1.2, level: 1.28, decay: 0.045 },
+      { tone: "sine", freq: 220, to: 160, level: 0.32, decay: 0.05 },
+    ],
+    // 退格更轻、更短、更高，一听就知道是删
+    backspace: [
+      { noise: "bandpass", freq: 4200, q: 0.8, level: 0.69, decay: 0.005 },
+      { noise: "bandpass", freq: 2600, q: 2, level: 1.38, decay: 0.018 },
+    ],
+    enter: [
+      { noise: "bandpass", freq: 2800, q: 0.8, level: 0.37, decay: 0.01 },
+      { noise: "bandpass", freq: 1000, q: 1, level: 1.05, decay: 0.06 },
+      { tone: "sine", freq: 170, to: 120, level: 0.31, decay: 0.06 },
+      // 回车时托架滑回去的一下「刷」
+      { noise: "bandpass", freq: 1800, q: 0.8, level: 0.12, delay: 0.05, attack: 0.03, decay: 0.12 },
+    ],
+  },
+  mechanical: {
+    gain: 1,
+    jitter: 0.04,
+    bell: "bell",
+    // 1.7.3 原始机械键盘音色：每个键一声下滑的正弦，字符、退格、回车再叠一层中频碰撞作落点和青轴的「哒」；
+    // 空格（含中文选字上屏）保持原来那声纯的低沉「咚」
+    char: [
+      { tone: "sine", freq: 320, to: 80, level: 0.65, decay: 0.025 },
+      { noise: "bandpass", freq: 1200, q: 2, level: 0.75, decay: 0.01 },
+      // 青轴：越过触发点时簧片弹响的一声「哒」，松开时还有一声更轻的
+      { noise: "bandpass", freq: 3200, q: 3, level: 0.9, decay: 0.005 },
+      { tone: "sine", freq: 3500, level: 0.12, decay: 0.006 },
+      { noise: "bandpass", freq: 2800, q: 3, level: 0.2, delay: 0.07, decay: 0.004 },
+    ],
+    space: [
+      { tone: "sine", freq: 110, to: 45, level: 0.75, decay: 0.05 },
+    ],
+    backspace: [
+      { tone: "sine", freq: 580, to: 260, level: 0.6, decay: 0.022 },
+      { noise: "bandpass", freq: 1500, q: 2, level: 0.65, decay: 0.008 },
+      { noise: "bandpass", freq: 3400, q: 3, level: 0.78, decay: 0.004 },
+      { tone: "sine", freq: 3700, level: 0.1, decay: 0.005 },
+      { noise: "bandpass", freq: 3000, q: 3, level: 0.16, delay: 0.06, decay: 0.004 },
+    ],
+    enter: [
+      { tone: "sine", freq: 240, to: 60, level: 0.85, decay: 0.07 },
+      { noise: "bandpass", freq: 1000, q: 2, level: 0.8, decay: 0.012 },
+      { noise: "bandpass", freq: 3000, q: 3, level: 0.9, decay: 0.006 },
+      { tone: "sine", freq: 3300, level: 0.12, decay: 0.007 },
+      { noise: "bandpass", freq: 2600, q: 3, level: 0.2, delay: 0.08, decay: 0.005 },
+    ],
+  },
+  raindrop: {
+    gain: 0.7,
+    jitter: 0.15,
+    bell: "bell",
+    // 水滴是一声快速上扬的「滴」
+    char: [
+      { tone: "sine", freq: 1100, to: 1900, sweep: 0.012, level: 0.55, attack: 0.0015, decay: 0.045 },
+      { noise: "bandpass", freq: 3000, level: 0.08, decay: 0.01 },
+    ],
+    space: [
+      { tone: "sine", freq: 750, to: 1250, sweep: 0.016, level: 0.55, attack: 0.0015, decay: 0.06 },
+      { noise: "bandpass", freq: 1500, q: 0.8, level: 0.088, decay: 0.015 },
+    ],
+    backspace: [
+      { tone: "sine", freq: 1700, to: 2400, sweep: 0.008, level: 0.45, attack: 0.0015, decay: 0.025 },
+    ],
+    enter: [
+      { tone: "sine", freq: 600, to: 1050, sweep: 0.02, level: 0.55, attack: 0.0015, decay: 0.08 },
+      { tone: "sine", freq: 1400, to: 2200, sweep: 0.012, level: 0.2, delay: 0.06, attack: 0.0015, decay: 0.035 },
+      { noise: "bandpass", freq: 1200, q: 0.7, level: 0.1, attack: 0.005, decay: 0.04 },
+    ],
+  },
+  retro8bit: {
+    gain: 1.5,
+    jitter: 0,
+    // 字符随机落在五声音阶上，连打像一段小旋律
+    char: [
+      { tone: "square", freq: RETRO_NOTES, cut: 3500, level: 0.22, attack: 0.002, decay: 0.04 },
+    ],
+    space: [
+      { tone: "square", freq: 523.25, cut: 2000, level: 0.24, attack: 0.002, decay: 0.05 },
+    ],
+    backspace: [
+      { tone: "square", freq: 784, to: 523.25, sweep: 0.025, cut: 2500, level: 0.17, attack: 0.002, decay: 0.035 },
+    ],
+    enter: [
+      { tone: "square", freq: 1046.5, cut: 3000, level: 0.18, attack: 0.002, decay: 0.05 },
+      { tone: "square", freq: 1318.51, cut: 3000, level: 0.18, delay: 0.05, attack: 0.002, decay: 0.05 },
+      { tone: "square", freq: 1567.98, cut: 3000, level: 0.18, delay: 0.1, attack: 0.002, decay: 0.09 },
+    ],
+  },
+  woodenFish: {
+    gain: 0.6,
+    jitter: 0.03,
+    bell: "bowl",
+    // 木头的几个共振频率不成整数倍，听起来才「木」
+    char: [
+      { tone: "sine", freq: 760, level: 0.55, decay: 0.07 },
+      { tone: "sine", freq: 1976, level: 0.2, decay: 0.03 },
+      { noise: "bandpass", freq: 2500, q: 1.5, level: 0.25, decay: 0.006 },
+    ],
+    space: [
+      { tone: "sine", freq: 480, level: 0.55, decay: 0.1 },
+      { tone: "sine", freq: 1248, level: 0.15, decay: 0.04 },
+      { noise: "bandpass", freq: 1500, q: 1.5, level: 0.2, decay: 0.007 },
+    ],
+    backspace: [
+      { tone: "sine", freq: 1150, level: 0.49, decay: 0.04 },
+      { tone: "sine", freq: 2990, level: 0.17, decay: 0.015 },
+      { noise: "bandpass", freq: 3500, q: 1.5, level: 0.21, decay: 0.004 },
+    ],
+    enter: [
+      { tone: "sine", freq: 400, level: 0.6, decay: 0.12 },
+      { tone: "sine", freq: 1040, level: 0.2, decay: 0.05 },
+      { noise: "bandpass", freq: 1200, q: 1.5, level: 0.25, decay: 0.01 },
+    ],
+  },
+};
+// 回车提示音：音高放低到人耳不那么敏感的区段，泛音取整数倍，起音放软，
+// 听起来是一声轻「叮」而不是金属铃；颂钵更低、更长
+const BELL_SOUNDS = {
+  bell: [
+    { tone: "sine", freq: 783.99, level: 0.09, delay: 0.015, attack: 0.006, decay: 0.9 },
+    { tone: "sine", freq: 1567.98, level: 0.025, delay: 0.015, attack: 0.006, decay: 0.45 },
+    { tone: "sine", freq: 2351.97, level: 0.008, delay: 0.015, attack: 0.006, decay: 0.2 },
+  ],
+  bowl: [
+    { tone: "sine", freq: 528, level: 0.11, delay: 0.02, attack: 0.008, decay: 1.6 },
+    { tone: "sine", freq: 1430.9, level: 0.03, delay: 0.02, attack: 0.008, decay: 0.7 },
+    { tone: "sine", freq: 2719.2, level: 0.008, delay: 0.02, attack: 0.008, decay: 0.25 },
+  ],
+};
+
 class CrispFocusAudioEngine {
   constructor(app, getEnabled, getTheme, getVolume, getBellEnabled, getAmbientSound, getAmbientVol, windowObj, getSpaceEnabled = () => true) {
     this.app = app;
@@ -293,8 +471,11 @@ class CrispFocusAudioEngine {
     this.outputLimiter = null;
 
     // HD MP3 Ambient Player
-    this.ambientAudioEl = null;
-    this.currentAmbientSound = null;
+    this.ambient = null;
+    this.ambientBuffer = null;
+    this.ambientLoad = null;
+    this.ambientPending = null;
+    this.ambientRequest = 0;
   }
 
   unlock() {
@@ -326,11 +507,12 @@ class CrispFocusAudioEngine {
 
   getNoiseBuffer() {
     if (this.noiseBuffer) return this.noiseBuffer;
-    const bufferSize = Math.floor(this.ctx.sampleRate * 0.035);
+    // 一秒白噪声，每层从随机位置截一小段，各自加包络
+    const bufferSize = this.ctx.sampleRate;
     const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.22));
+      data[i] = Math.random() * 2 - 1;
     }
     this.noiseBuffer = buffer;
     return buffer;
@@ -373,93 +555,7 @@ class CrispFocusAudioEngine {
 
   // 1.1 Character keypress
   playCharKey() {
-    if (!this.getEnabled()) return;
-    this.unlock();
-    if (!this.ctx) return;
-
-    const theme = this.getTheme();
-    const now = this.ctx.currentTime;
-    const vol = this.MasterVolume;
-
-    if (theme === "mechanical") {
-      const freq = this.getRandomPitch(320);
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, now);
-      osc.frequency.exponentialRampToValueAtTime(80, now + 0.025);
-
-      gain.gain.setValueAtTime(vol * 0.65, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.025);
-    } else if (theme === "raindrop") {
-      const freq = this.getRandomPitch(1200);
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, now);
-      osc.frequency.exponentialRampToValueAtTime(500, now + 0.02);
-
-      gain.gain.setValueAtTime(vol * 0.5, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.02);
-    } else if (theme === "retro8bit") {
-      const freq = this.getRandomPitch(520);
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "square";
-      osc.frequency.setValueAtTime(freq, now);
-      osc.frequency.setValueAtTime(freq * 1.5, now + 0.012);
-
-      gain.gain.setValueAtTime(vol * 0.35, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.025);
-    } else if (theme === "woodenFish") {
-      const freq = this.getRandomPitch(560);
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, now);
-      osc.frequency.exponentialRampToValueAtTime(220, now + 0.04);
-
-      gain.gain.setValueAtTime(vol * 0.6, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.04);
-    } else {
-      const buffer = this.getNoiseBuffer();
-      const noise = this.ctx.createBufferSource();
-      noise.buffer = buffer;
-
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = "bandpass";
-      filter.frequency.setValueAtTime(this.getRandomPitch(2200), now);
-      filter.Q.setValueAtTime(3.8, now);
-
-      const gain = this.ctx.createGain();
-      gain.gain.setValueAtTime(vol * 0.55, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
-
-      noise.connect(filter);
-      filter.connect(gain);
-      this.connectOutput(gain);
-      noise.start(now);
-    }
+    this.playKeySound("char");
   }
 
   // 1.2 Spacebar / IME Confirm
@@ -470,170 +566,88 @@ class CrispFocusAudioEngine {
 
   // Shared key body; Enter must remain independent of the space preference.
   playSpaceImpact() {
+    this.playKeySound("space");
+  }
+
+  // 1.3 Backspace（长按连删时用更轻的一下）
+  playBackspaceKey(repeat = false) {
+    this.playKeySound("backspace", repeat ? 0.45 : 1);
+  }
+
+  playKeySound(kind, scale = 1) {
     if (!this.getEnabled()) return;
     this.unlock();
     if (!this.ctx) return;
+    const sound = TYPING_SOUNDS[this.getTheme()] || TYPING_SOUNDS.typewriter;
+    const vol = this.MasterVolume * sound.gain * scale;
+    if (vol <= 0) return;
 
-    const theme = this.getTheme();
     const now = this.ctx.currentTime;
-    const vol = this.MasterVolume;
-
-    if (theme === "mechanical") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(110, now);
-      osc.frequency.exponentialRampToValueAtTime(45, now + 0.05);
-
-      gain.gain.setValueAtTime(vol * 0.75, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.05);
-    } else if (theme === "raindrop") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(450, now);
-      osc.frequency.exponentialRampToValueAtTime(180, now + 0.04);
-
-      gain.gain.setValueAtTime(vol * 0.65, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.04);
-    } else if (theme === "retro8bit") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "square";
-      osc.frequency.setValueAtTime(220, now);
-      osc.frequency.exponentialRampToValueAtTime(660, now + 0.05);
-
-      gain.gain.setValueAtTime(vol * 0.4, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.05);
-    } else if (theme === "woodenFish") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(95, now);
-      osc.frequency.exponentialRampToValueAtTime(40, now + 0.08);
-
-      gain.gain.setValueAtTime(vol * 0.75, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.08);
-    } else {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(150, now);
-      osc.frequency.exponentialRampToValueAtTime(55, now + 0.06);
-
-      gain.gain.setValueAtTime(vol * 0.7, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.06);
+    // 同一下按键的各层共用一组随机值，听起来才是同一个键
+    const velocity = 0.75 + Math.random() * 0.25;
+    const pitch = 1 + (Math.random() * 2 - 1) * sound.jitter;
+    for (const layer of sound[kind]) {
+      this.playLayer(layer, now, vol * velocity, pitch);
+    }
+    if (kind === "enter" && sound.bell && this.getBellEnabled()) {
+      for (const layer of BELL_SOUNDS[sound.bell]) {
+        this.playLayer(layer, now, this.MasterVolume, 1);
+      }
     }
   }
 
-  // 1.3 Backspace
-  playBackspaceKey() {
-    if (!this.getEnabled()) return;
-    this.unlock();
-    if (!this.ctx) return;
+  playLayer(layer, now, vol, pitch) {
+    const ctx = this.ctx;
+    const at = now + (layer.delay || 0);
+    const attack = layer.attack ?? 0.001;
+    const end = at + attack + layer.decay;
+    const level = vol * layer.level;
+    let source;
+    let head;
 
-    const theme = this.getTheme();
-    const now = this.ctx.currentTime;
-    const vol = this.MasterVolume;
-
-    if (theme === "mechanical") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(580, now);
-      osc.frequency.exponentialRampToValueAtTime(260, now + 0.022);
-
-      gain.gain.setValueAtTime(vol * 0.6, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.022);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.022);
-    } else if (theme === "raindrop") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(1600, now);
-      osc.frequency.exponentialRampToValueAtTime(2400, now + 0.018);
-
-      gain.gain.setValueAtTime(vol * 0.45, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.018);
-    } else if (theme === "retro8bit") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "square";
-      osc.frequency.setValueAtTime(600, now);
-      osc.frequency.exponentialRampToValueAtTime(200, now + 0.03);
-
-      gain.gain.setValueAtTime(vol * 0.4, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.03);
-    } else if (theme === "woodenFish") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "triangle";
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.exponentialRampToValueAtTime(440, now + 0.02);
-
-      gain.gain.setValueAtTime(vol * 0.55, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.02);
+    if (layer.noise) {
+      source = ctx.createBufferSource();
+      source.buffer = this.getNoiseBuffer();
+      const filter = ctx.createBiquadFilter();
+      filter.type = layer.noise;
+      filter.frequency.setValueAtTime(layer.freq * pitch, at);
+      filter.Q.setValueAtTime(layer.q ?? 0.9, at);
+      source.connect(filter);
+      head = filter;
     } else {
-      const buffer = this.getNoiseBuffer();
-      const noise = this.ctx.createBufferSource();
-      noise.buffer = buffer;
+      source = ctx.createOscillator();
+      source.type = layer.tone;
+      const base = Array.isArray(layer.freq)
+        ? layer.freq[Math.floor(Math.random() * layer.freq.length)]
+        : layer.freq;
+      source.frequency.setValueAtTime(base * pitch, at);
+      if (layer.to) {
+        source.frequency.exponentialRampToValueAtTime(layer.to * pitch, at + (layer.sweep ?? layer.decay));
+      }
+      head = source;
+      if (layer.cut) {
+        // 方波直出太扎耳，削掉高频
+        const filter = ctx.createBiquadFilter();
+        filter.type = "lowpass";
+        filter.frequency.setValueAtTime(layer.cut, at);
+        source.connect(filter);
+        head = filter;
+      }
+    }
 
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = "highpass";
-      filter.frequency.setValueAtTime(1400, now);
+    // 起音给 1-2ms 斜坡，避免波形突变带来的爆音
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(level, at + attack);
+    gain.gain.exponentialRampToValueAtTime(Math.max(level * 0.001, 0.00001), end);
+    head.connect(gain);
+    this.connectOutput(gain);
 
-      const gain = this.ctx.createGain();
-      gain.gain.setValueAtTime(vol * 0.45, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
-
-      noise.connect(filter);
-      filter.connect(gain);
-      this.connectOutput(gain);
-      noise.start(now);
+    if (layer.noise) {
+      source.start(at, Math.random() * 0.8, end - at + 0.01);
+    } else {
+      source.start(at);
+      source.stop(end + 0.01);
     }
   }
 
@@ -663,150 +677,115 @@ class CrispFocusAudioEngine {
   }
 
   playEnterKey() {
-    if (!this.getEnabled()) return;
-    this.unlock();
-    if (!this.ctx) return;
-
-    const theme = this.getTheme();
-    const now = this.ctx.currentTime;
-    const vol = this.MasterVolume;
-
-    if (theme === "mechanical") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(240, now);
-      osc.frequency.exponentialRampToValueAtTime(60, now + 0.07);
-
-      gain.gain.setValueAtTime(vol * 0.85, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.07);
-    } else if (theme === "raindrop") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(800, now);
-      osc.frequency.exponentialRampToValueAtTime(180, now + 0.06);
-
-      gain.gain.setValueAtTime(vol * 0.7, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.06);
-    } else if (theme === "retro8bit") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "square";
-      osc.frequency.setValueAtTime(987.77, now);
-      osc.frequency.setValueAtTime(1318.5, now + 0.05);
-
-      gain.gain.setValueAtTime(vol * 0.5, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.22);
-    } else if (theme === "woodenFish") {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(90, now);
-      osc.frequency.exponentialRampToValueAtTime(35, now + 0.09);
-
-      gain.gain.setValueAtTime(vol * 0.8, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-
-      osc.connect(gain);
-      this.connectOutput(gain);
-      osc.start(now);
-      osc.stop(now + 0.09);
-
-      if (this.getBellEnabled()) {
-        const bowlOsc = this.ctx.createOscillator();
-        const bowlGain = this.ctx.createGain();
-        bowlOsc.type = "sine";
-        bowlOsc.frequency.setValueAtTime(880, now + 0.02);
-
-        bowlGain.gain.setValueAtTime(0.001, now);
-        bowlGain.gain.setValueAtTime(vol * 0.7, now + 0.02);
-        bowlGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.75);
-
-        bowlOsc.connect(bowlGain);
-        this.connectOutput(bowlGain);
-        bowlOsc.start(now + 0.02);
-        bowlOsc.stop(now + 0.75);
-      }
-      return;
-    } else {
-      this.playSpaceImpact();
-    }
-
-    if (this.getBellEnabled() && theme !== "woodenFish" && theme !== "retro8bit") {
-      const bellOsc = this.ctx.createOscillator();
-      const bellGain = this.ctx.createGain();
-      bellOsc.type = "sine";
-      bellOsc.frequency.setValueAtTime(1567.98, now + 0.02);
-
-      bellGain.gain.setValueAtTime(0.001, now);
-      bellGain.gain.setValueAtTime(vol * 0.85, now + 0.02);
-      bellGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
-
-      bellOsc.connect(bellGain);
-      this.connectOutput(bellGain);
-      bellOsc.start(now + 0.02);
-      bellOsc.stop(now + 0.45);
-    }
+    this.playKeySound("enter");
   }
 
   // 1.5 HD Local MP3 Ambient Audio Player (Seamless Loop)
   updateAmbient() {
     const soundName = this.getAmbientSound(); // 'off', 'rain', 'campfire', 'ocean', 'wind'
-    const vol = this.getAmbientVol();
+    const vol = Math.max(0, Math.min(1, this.getAmbientVol()));
 
     if (soundName === "off" || vol <= 0) {
       this.stopAmbient();
-      return;
+      return Promise.resolve();
     }
 
-    if (!this.ambientAudioEl) {
-      this.ambientAudioEl = new Audio();
-      this.ambientAudioEl.loop = true;
+    this.unlock();
+    if (!this.ctx) return Promise.resolve();
+
+    if (this.ambient?.name === soundName) {
+      if (this.ambient.volume !== vol) {
+        this.ambient.volume = vol;
+        this.glideGain(this.ambient.gain.gain, vol, 0.05);
+      }
+      return Promise.resolve();
     }
+    if (this.ambientPending === soundName) return this.ambientLoad;
 
-    const configDir = this.app.vault.configDir || ".obsidian";
-    const relativePath = `${configDir}/plugins/crisp-focus/audio/${soundName}.mp3`;
-    const resourceUrl = this.app.vault.adapter.getResourcePath(relativePath);
-
-    const soundChanged = this.currentAmbientSound !== soundName;
-    if (soundChanged) {
-      this.currentAmbientSound = soundName;
-      this.ambientAudioEl.src = resourceUrl;
-      this.ambientAudioEl.currentTime = 0;
-    }
-
-    this.ambientAudioEl.volume = Math.max(0, Math.min(1, vol));
-
-    if (soundChanged || this.ambientAudioEl.paused) {
-      this.ambientAudioEl.play().catch((err) => {
+    this.fadeOutAmbient();
+    const request = ++this.ambientRequest;
+    this.ambientPending = soundName;
+    this.ambientLoad = this.loadAmbientBuffer(soundName)
+      .then((buffer) => {
+        if (request !== this.ambientRequest || !this.ctx) return;
+        this.ambientPending = null;
+        this.ambientLoad = null;
+        this.startAmbient(soundName, buffer);
+      })
+      .catch((err) => {
+        if (request === this.ambientRequest) {
+          this.ambientPending = null;
+          this.ambientLoad = null;
+        }
         console.warn("Ambient audio play failed:", err);
       });
+    return this.ambientLoad;
+  }
+
+  async loadAmbientBuffer(soundName) {
+    if (this.ambientBuffer?.name === soundName) return this.ambientBuffer.buffer;
+    const configDir = this.app.vault.configDir || ".obsidian";
+    const data = await this.app.vault.adapter.readBinary(`${configDir}/plugins/crisp-focus/audio/${soundName}.mp3`);
+    const ctx = this.ctx;
+    if (!ctx) throw new Error("Audio context closed while loading ambient sound");
+    const buffer = buildAmbientLoop(ctx, await ctx.decodeAudioData(data));
+    this.ambientBuffer = { name: soundName, buffer };
+    return buffer;
+  }
+
+  startAmbient(soundName, buffer) {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const vol = Math.max(0, Math.min(1, this.getAmbientVol()));
+    const source = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    source.buffer = buffer;
+    source.loop = true;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.setTargetAtTime(vol, now, AMBIENT_FADE_IN / 4);
+    source.connect(gain);
+    // 不走按键音的限幅器，免得快速打字时把环境音一起压下去
+    gain.connect(ctx.destination);
+    source.onended = () => {
+      source.disconnect();
+      gain.disconnect();
+    };
+    source.start(now);
+    this.ambient = { name: soundName, source, gain, volume: vol };
+  }
+
+  glideGain(param, target, timeConstant) {
+    const now = this.ctx.currentTime;
+    // 从当前值接着滑，不让正在进行的淡入淡出跳回起点
+    if (typeof param.cancelAndHoldAtTime === "function") {
+      param.cancelAndHoldAtTime(now);
+    } else {
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+    }
+    param.setTargetAtTime(target, now, timeConstant);
+  }
+
+  fadeOutAmbient() {
+    const ambient = this.ambient;
+    if (!ambient) return;
+    this.ambient = null;
+    try {
+      this.glideGain(ambient.gain.gain, 0, AMBIENT_FADE_OUT / 5);
+      ambient.source.stop(this.ctx.currentTime + AMBIENT_FADE_OUT);
+    } catch {
+      ambient.source.stop();
     }
   }
 
   stopAmbient() {
-    if (this.ambientAudioEl) {
-      this.ambientAudioEl.pause();
-      this.ambientAudioEl.src = "";
-      this.ambientAudioEl = null;
-      this.currentAmbientSound = null;
-    }
+    this.ambientRequest += 1;
+    this.ambientPending = null;
+    this.ambientLoad = null;
+    // 解码后的整段音频有几十 MB，停下就释放，恢复时重新解码
+    this.ambientBuffer = null;
+    if (this.ctx) this.fadeOutAmbient();
+    else this.ambient = null;
   }
 
   destroy() {
@@ -3398,7 +3377,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   attachWindow(windowObj) {
     if (!windowObj || this.windowBindings.has(windowObj)) return;
-    const state = { isComposing: false, lastCharKeydownAt: 0 };
+    const state = { isComposing: false, lastCharKeydownAt: 0, lastRepeatAt: 0 };
     const gestureHandler = () => {
       if (!this.settings.focusModeEnabled) return;
       this.audio.handleUserGesture();
@@ -3440,6 +3419,15 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (!this.isAudioHostTarget(activeEl)) return;
 
       const key = evt.key;
+      // 长按自动重复：真键盘按住只响一下，只有连删保留一串轻响，提示还在删
+      if (evt.repeat) {
+        if (key !== "Backspace" && key !== "Delete") return;
+        const now = Date.now();
+        if (now - state.lastRepeatAt < 70) return;
+        state.lastRepeatAt = now;
+        this.audio.playBackspaceKey(true);
+        return;
+      }
       if (state.isComposing || evt.isComposing || evt.keyCode === 229) {
         if (key.length === 1 && key !== " ") {
           state.lastCharKeydownAt = Date.now();

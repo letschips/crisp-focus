@@ -71,8 +71,44 @@ function createAudioContext() {
     exponentialRampToValueAtTime() {},
     setValueAtTime() {},
   };
+  const createRecordedParam = (value) => ({
+    events: [],
+    value,
+    cancelAndHoldAtTime(time) {
+      this.events.push(["hold", time]);
+    },
+    cancelScheduledValues(time) {
+      this.events.push(["cancel", time]);
+    },
+    exponentialRampToValueAtTime(target, time) {
+      this.events.push(["exp", target, time]);
+    },
+    linearRampToValueAtTime(target, time) {
+      this.events.push(["linear", target, time]);
+    },
+    setTargetAtTime(target, time, constant) {
+      this.events.push(["target", target, time, constant]);
+    },
+    setValueAtTime(target, time) {
+      this.events.push(["set", target, time]);
+    },
+  });
+  const createAudioBuffer = (channels, length, sampleRate) => {
+    const data = Array.from({ length: channels }, () => new Float32Array(length));
+    return {
+      duration: length / sampleRate,
+      length,
+      numberOfChannels: channels,
+      sampleRate,
+      getChannelData(channel) {
+        return data[channel];
+      },
+    };
+  };
   const context = {
     calls,
+    ambientSources: [],
+    decodedLength: 8000 * 20,
     currentTime: 0,
     destination: { kind: "destination" },
     sampleRate: 48_000,
@@ -86,22 +122,34 @@ function createAudioContext() {
         type: "",
       };
     },
-    createBuffer(_channels, length) {
+    createBuffer(channels, length, sampleRate) {
       calls.bufferCreations += 1;
-      return {
-        getChannelData() {
-          return new Float32Array(length);
-        },
-      };
+      return createAudioBuffer(channels, length, sampleRate);
+    },
+    async decodeAudioData(data) {
+      const buffer = createAudioBuffer(2, context.decodedLength, 8000);
+      buffer.decodedFrom = data.path;
+      return buffer;
     },
     createBufferSource() {
-      return {
+      const source = {
         buffer: null,
+        loop: false,
+        onended: null,
+        startedAt: null,
+        stoppedAt: null,
         connect() {},
-        start() {
+        disconnect() {},
+        start(time) {
           calls.bufferSourceStarts += 1;
+          source.startedAt = time;
+          if (source.loop) context.ambientSources.push(source);
+        },
+        stop(time) {
+          source.stoppedAt = time ?? context.currentTime;
         },
       };
+      return source;
     },
     createDynamicsCompressor() {
       calls.compressorCreations += 1;
@@ -126,7 +174,8 @@ function createAudioContext() {
             calls.directDestinationConnections += 1;
           }
         },
-        gain: audioParam,
+        disconnect() {},
+        gain: createRecordedParam(1),
         kind: "gain",
       };
     },
@@ -271,6 +320,7 @@ function loadPluginInternals(options = {}) {
   const source = `${fs.readFileSync(pluginPath, "utf8")}
 module.exports.__test = {
   CrispFocusAudioEngine,
+  buildAmbientLoop: typeof buildAmbientLoop === "function" ? buildAmbientLoop : undefined,
   CrispFocusLicenseManager: typeof CrispFocusLicenseManager === "function" ? CrispFocusLicenseManager : undefined,
   CrispFocusPlugin,
   CrispTypewriterEngine: typeof CrispTypewriterEngine === "function" ? CrispTypewriterEngine : undefined,
@@ -711,8 +761,13 @@ function createPluginApp(windowObject) {
   return {
     vault: {
       adapter: {
+        binaryReads: [],
         getResourcePath(relativePath) {
           return relativePath;
+        },
+        async readBinary(relativePath) {
+          this.binaryReads.push(relativePath);
+          return { path: relativePath };
         },
       },
       configDir: ".obsidian",
@@ -771,7 +826,8 @@ test("default typewriter Backspace sound completes without throwing", () => {
 
   assert.doesNotThrow(() => engine.playBackspaceKey());
   assert.equal(context.calls.bufferCreations, 1);
-  assert.equal(context.calls.bufferSourceStarts, 1);
+  // 两层噪声：敲击瞬态 + 键体，共用同一段噪声 buffer
+  assert.equal(context.calls.bufferSourceStarts, 2);
   assert.equal(context.calls.oscillatorStarts, 0);
   assert.equal(context.calls.oscillatorStops, 0);
 });
@@ -986,9 +1042,12 @@ test("disabling animated cursor immediately clears existing editor styles", asyn
   plugin.onunload();
 });
 
+const settleAudio = () => new Promise((resolve) => setImmediate(resolve));
+const playingAmbient = (context) => context.ambientSources.filter((source) => source.stoppedAt === null);
+
 test("one typing keydown starts ambient audio at most once", async () => {
-  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
-  const { windowObject } = createWindow();
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { context, windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
   grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
@@ -1005,15 +1064,17 @@ test("one typing keydown starts ambient audio at most once", async () => {
     key: "a",
     metaKey: false,
   });
+  await settleAudio();
 
-  assert.equal(audioElements.length, 1);
-  assert.equal(audioElements[0].playCalls, 1);
+  assert.deepEqual(plugin.app.vault.adapter.binaryReads, [".obsidian/plugins/crisp-focus/audio/rain.mp3"]);
+  assert.equal(context.ambientSources.length, 1);
+  assert.equal(context.ambientSources[0].loop, true);
   plugin.onunload();
 });
 
 test("repeated typing reuses an already-playing ambient track", async () => {
-  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
-  const { windowObject } = createWindow();
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { context, windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
   grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
@@ -1032,14 +1093,49 @@ test("repeated typing reuses an already-playing ambient track", async () => {
   };
   windowObject.dispatch("keydown", keydown);
   windowObject.dispatch("keydown", keydown);
+  await settleAudio();
+  const gainEvents = plugin.audio.ambient.gain.gain.events.length;
+  windowObject.dispatch("keydown", keydown);
+  await settleAudio();
 
-  assert.equal(audioElements.length, 1);
-  assert.equal(audioElements[0].playCalls, 1);
+  assert.equal(plugin.app.vault.adapter.binaryReads.length, 1);
+  assert.equal(context.ambientSources.length, 1);
+  assert.equal(plugin.audio.ambient.gain.gain.events.length, gainEvents);
+  plugin.onunload();
+});
+
+test("held keys stay quiet except a throttled, lighter Backspace", async () => {
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ typewriterAudioEnabled: true });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+
+  const played = [];
+  plugin.audio.playCharKey = () => played.push("char");
+  plugin.audio.playEnterKey = () => played.push("enter");
+  plugin.audio.playBackspaceKey = (repeat) => played.push(repeat ? "backspace-repeat" : "backspace");
+  const press = (key, repeat = false) => windowObject.dispatch("keydown", {
+    altKey: false, ctrlKey: false, metaKey: false, key, repeat,
+  });
+
+  press("a");
+  press("a", true);
+  press("Enter");
+  press("Enter", true);
+  press("Backspace");
+  press("Backspace", true);
+  press("Backspace", true);
+
+  assert.deepEqual(played, ["char", "enter", "backspace", "backspace-repeat"]);
   plugin.onunload();
 });
 
 test("disabled Focus mode stays audio-lazy on user gestures", async () => {
-  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
+  const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
   plugin.app = createPluginApp(windowObject);
@@ -1059,9 +1155,107 @@ test("disabled Focus mode stays audio-lazy on user gestures", async () => {
     metaKey: false,
   });
 
+  await settleAudio();
   assert.equal(plugin.audio.ctx, null);
-  assert.equal(audioElements.length, 0);
+  assert.equal(plugin.app.vault.adapter.binaryReads.length, 0);
   plugin.onunload();
+});
+
+function createAmbientEngine(state) {
+  const { CrispFocusAudioEngine } = loadPluginInternals();
+  const { context, windowObject } = createWindow();
+  const app = createPluginApp(windowObject);
+  const engine = new CrispFocusAudioEngine(
+    app,
+    () => true,
+    () => "typewriter",
+    () => 0.7,
+    () => true,
+    () => state.sound,
+    () => state.volume,
+    windowObject
+  );
+  return { app, context, engine };
+}
+
+test("ambient loop crossfades its own tail into its head so the wrap point is seamless", () => {
+  const { buildAmbientLoop } = loadPluginInternals();
+  const { context } = createWindow();
+  const rate = 1000;
+  const source = context.createBuffer(2, rate * 20, rate);
+  for (let channel = 0; channel < 2; channel++) {
+    const data = source.getChannelData(channel);
+    for (let i = 0; i < data.length; i++) data[i] = Math.sin(i * 0.37 + channel) * 0.5;
+  }
+
+  const loop = buildAmbientLoop(context, source);
+  const head = 0.75 * rate;
+  const tail = 3 * rate;
+  const fade = 4 * rate;
+  const region = source.length - head - tail;
+  assert.equal(loop.length, region - fade);
+  assert.equal(loop.numberOfChannels, 2);
+  for (let channel = 0; channel < 2; channel++) {
+    const input = source.getChannelData(channel);
+    const output = loop.getChannelData(channel);
+    // 循环末尾之后紧接的应是原素材的下一个采样：开头几乎全是尾段
+    assert.ok(Math.abs(output[0] - input[head + loop.length]) < 0.01);
+    // 交叉淡化结束处回到原素材本身
+    assert.ok(Math.abs(output[fade - 1] - input[head + fade - 1]) < 0.01);
+    assert.equal(output[fade], input[head + fade]);
+    assert.equal(output[loop.length - 1], input[head + loop.length - 1]);
+  }
+
+  const short = context.createBuffer(2, rate * 8, rate);
+  assert.equal(buildAmbientLoop(context, short), short);
+});
+
+test("switching ambient sounds while one is still loading plays only the latest choice", async () => {
+  const state = { sound: "rain", volume: 0.6 };
+  const { app, context, engine } = createAmbientEngine(state);
+
+  engine.updateAmbient();
+  state.sound = "ocean";
+  await engine.updateAmbient();
+  await settleAudio();
+
+  assert.deepEqual(app.vault.adapter.binaryReads, [
+    ".obsidian/plugins/crisp-focus/audio/rain.mp3",
+    ".obsidian/plugins/crisp-focus/audio/ocean.mp3",
+  ]);
+  assert.equal(context.ambientSources.length, 1);
+  assert.equal(engine.ambient.name, "ocean");
+});
+
+test("stopping ambient while it is still loading keeps it silent", async () => {
+  const state = { sound: "rain", volume: 0.6 };
+  const { context, engine } = createAmbientEngine(state);
+
+  engine.updateAmbient();
+  engine.stopAmbient();
+  await settleAudio();
+
+  assert.equal(context.ambientSources.length, 0);
+  assert.equal(engine.ambient, null);
+});
+
+test("ambient fades in on start and glides to a new volume without restarting", async () => {
+  const state = { sound: "wind", volume: 0.6 };
+  const { context, engine } = createAmbientEngine(state);
+
+  await engine.updateAmbient();
+  const gain = engine.ambient.gain.gain;
+  assert.deepEqual(gain.events[0], ["set", 0, 0]);
+  assert.equal(gain.events.some(([kind, target]) => kind === "target" && target === 0.6), true);
+
+  state.volume = 0.3;
+  await engine.updateAmbient();
+  assert.equal(context.ambientSources.length, 1);
+  assert.deepEqual(gain.events.at(-1).slice(0, 2), ["target", 0.3]);
+
+  state.volume = 0;
+  await engine.updateAmbient();
+  assert.equal(playingAmbient(context).length, 0);
 });
 
 test("repeated typewriter keypresses reuse the noise buffer", () => {
@@ -1119,6 +1313,46 @@ test("typing audio follows pop-out window lifecycle", async () => {
   plugin.onunload();
 });
 
+test("every typing theme ramps each layer up from silence and varies key to key", () => {
+  for (const theme of ["typewriter", "mechanical", "raindrop", "retro8bit", "woodenFish"]) {
+    const { CrispFocusAudioEngine } = loadPluginInternals();
+    const { context, windowObject } = createWindow();
+    const gains = [];
+    const createGain = context.createGain;
+    context.createGain = () => {
+      const gain = createGain();
+      gains.push(gain);
+      return gain;
+    };
+    const engine = new CrispFocusAudioEngine(
+      createPluginApp(windowObject),
+      () => true,
+      () => theme,
+      () => 0.7,
+      () => true,
+      () => "off",
+      () => 0.65,
+      windowObject
+    );
+    engine.ctx = context;
+
+    engine.playCharKey();
+    const firstPress = gains.filter((gain) => gain !== engine.outputGain).length;
+    engine.playCharKey();
+    engine.playSpaceKey();
+    engine.playBackspaceKey();
+    engine.playEnterKey();
+
+    const layers = gains.filter((gain) => gain !== engine.outputGain);
+    for (const gain of layers) {
+      // 直接从非零电平起跳会出爆音
+      assert.deepEqual(gain.gain.events[0].slice(0, 2), ["set", 0], theme);
+    }
+    const peak = (gain) => gain.gain.events.find(([kind]) => kind === "linear")[1];
+    assert.notEqual(peak(layers[0]), peak(layers[firstPress]), `${theme} 连按两下力度应有差别`);
+  }
+});
+
 test("synthesized key sounds share one output limiter", () => {
   const { CrispFocusAudioEngine } = loadPluginInternals();
   const { context, windowObject } = createWindow();
@@ -1143,8 +1377,8 @@ test("synthesized key sounds share one output limiter", () => {
 });
 
 test("Focus mode disables all effects without erasing feature choices", async () => {
-  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
-  const { windowObject } = createWindow();
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { context, windowObject } = createWindow();
   const editor = {
     classList: createClassList(),
     style: createStyle(),
@@ -1165,7 +1399,8 @@ test("Focus mode disables all effects without erasing feature choices", async ()
   });
   plugin.saveData = async () => {};
   await plugin.onload();
-  plugin.audio.updateAmbient();
+  await plugin.audio.updateAmbient();
+  const ambientGain = plugin.audio.ambient.gain.gain;
 
   await plugin.setFocusModeEnabled(false);
 
@@ -1175,7 +1410,10 @@ test("Focus mode disables all effects without erasing feature choices", async ()
   assert.equal(plugin.audio.getEnabled(), false);
   assert.equal(plugin.audio.getAmbientSound(), "off");
   assert.equal(editor.classList.contains("crisp-focus-active"), false);
-  assert.equal(audioElements[0].paused, true);
+  assert.equal(playingAmbient(context).length, 0);
+  // 关闭时淡出而不是硬切：增益滑向 0，音源在淡出结束后才停
+  assert.equal(ambientGain.events.some(([kind, target]) => kind === "target" && target === 0), true);
+  assert.ok(context.ambientSources[0].stoppedAt > context.currentTime);
   plugin.onunload();
 });
 
@@ -1758,8 +1996,8 @@ test('IME commit followed by insertText does not play a second sound', async () 
 // ---- 1.4.5 regressions -------------------------------------------------------
 
 test('a paused session keeps ambient audio silent through later typing and clicks', async () => {
-  const { CrispFocusPlugin, audioElements } = loadPluginInternals();
-  const { windowObject } = createWindow();
+  const { CrispFocusPlugin } = loadPluginInternals();
+  const { context, windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
   grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
@@ -1771,9 +2009,11 @@ test('a paused session keeps ambient audio silent through later typing and click
     await plugin.pauseFocusSession();
     windowObject.dispatch('keydown', { altKey: false, ctrlKey: false, metaKey: false, key: 'a' });
     windowObject.dispatch('pointerdown', {});
-    assert.equal(audioElements.filter((el) => !el.paused).length, 0, 'ambient must stay stopped while paused');
+    await settleAudio();
+    assert.equal(playingAmbient(context).length, 0, 'ambient must stay stopped while paused');
     await plugin.resumeFocusSession();
-    assert.equal(audioElements.filter((el) => !el.paused).length, 1, 'resume brings ambient back');
+    await settleAudio();
+    assert.equal(playingAmbient(context).length, 1, 'resume brings ambient back');
   } finally { plugin.onunload(); }
 });
 
