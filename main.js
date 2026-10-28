@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.8.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.9.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1660,7 +1660,22 @@ function formatSessionRemaining(remainingMs) {
 
 // 番茄钟：专注 → 短休，每 N 个专注后换成长休。专注阶段沿用专注会话的计时与环境音，休息阶段关掉专注效果。
 // 2：开始专注/番茄时可传 { task }，事件和快照带上这段专注属于哪个任务（Crisp Tempo）。
-const FOCUS_API_VERSION = 2;
+// 3：结束的专注先记进会话日志（getSessionLog），结束事件带 seq；其他插件漏听事件时可以照日志补记。
+const FOCUS_API_VERSION = 3;
+// 会话日志只留最近这么多段：够停用几天的插件补记，又不让每次写设置都变慢
+const SESSION_LOG_LIMIT = 300;
+
+/** 读回的会话日志：形状不对的条目丢掉，seq 只增不减。 */
+function cleanSessionLog(rawLog, rawSeq) {
+  const log = (Array.isArray(rawLog) ? rawLog : [])
+    .filter((x) => x && typeof x === "object" && typeof x.id === "string" && x.id
+      && Number.isInteger(x.seq) && x.seq > 0 && (x.type === "stop" || x.type === "complete"))
+    .sort((a, b) => a.seq - b.seq)
+    .slice(-SESSION_LOG_LIMIT);
+  const newest = log.length ? log[log.length - 1].seq : 0;
+  const seq = Math.max(newest, Number.isInteger(rawSeq) && rawSeq > 0 ? rawSeq : 0);
+  return { log, seq };
+}
 const POMODORO_PHASE_LABELS = Object.freeze({ focus: "专注", "short-break": "短休", "long-break": "长休" });
 
 function clampMinutes(value, fallback, max = 240) {
@@ -1883,6 +1898,9 @@ const DEFAULT_SETTINGS = {
   pomodoroChime: true,
   pomodoroDailyGoal: 8,
   pomodoroToday: { date: "", count: 0, focusMinutes: 0 },
+  // 结束的专注（完成，或中途结束但满 1 分钟），按 seq 递增；其他插件据此补记漏掉的事件
+  sessionLog: [],
+  sessionLogSeq: 0,
   // 清爽打字本身不保存，重启后回到普通界面；这里只存它的选项
   cleanTypingHideStatusBar: true
 };
@@ -1928,9 +1946,10 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
   onSessionUpdate(snapshot, reason) {
     if (!this.sessionControlSetting || !this.containerEl?.isConnected) return;
+    // 会话可能在状态栏面板、命令或番茄阶段切换里变了：按钮跟着重画，每秒只更新剩余时间
     if (reason === "tick") {
       this.sessionControlSetting.setDesc(`剩余 ${formatSessionRemaining(snapshot.remainingMs)}`);
-    } else if (reason === "complete") {
+    } else {
       this.display();
     }
   }
@@ -2577,6 +2596,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.settingsWriteBlocked = false;
     const savedSettings = await this.loadSavedSettings();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
+    const sessionLog = cleanSessionLog(savedSettings.sessionLog, savedSettings.sessionLogSeq);
+    this.settings.sessionLog = sessionLog.log;
+    this.settings.sessionLogSeq = sessionLog.seq;
     if (!Object.prototype.hasOwnProperty.call(savedSettings, "activeSceneId")) {
       this.settings.activeSceneId = Object.keys(savedSettings).length > 0
         ? "custom"
@@ -2643,6 +2665,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     } else if (restored.status === "idle" && !this.settings.pomodoroState?.waiting) {
       this.settings.sessionMeta = null;
       if (this.settings.pomodoroState) this.settings.pomodoroState = null;
+    } else if (this.dropStalePomodoroCycle()) {
+      await this.saveSettings();
     }
     this.renderSessionStatus(restored);
     this.cleanTypingActive = false;
@@ -3049,9 +3073,22 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.statusBarEl.setAttr("aria-label", task ? `${task.title} · 打开番茄钟` : "打开番茄钟");
   }
 
+  /* 等着开始下一个的那一轮番茄，过了一天就不再接着：今天的计数已经归零，面板从新的一轮开始。
+     等待前一定刚完成过一个专注，pomodoroToday 记的就是那一天。 */
+  dropStalePomodoroCycle() {
+    const state = this.settings.pomodoroState;
+    if (!state?.waiting || this.session.getSnapshot().status !== "idle") return false;
+    if (this.settings.pomodoroToday?.date === localDateKey()) return false;
+    this.settings.pomodoroState = null;
+    this.settings.sessionMeta = null;
+    this.renderSessionStatus(this.session.getSnapshot());
+    return true;
+  }
+
   /** 状态栏上方弹出的番茄钟面板；再点一次状态栏、点面板外面或按 Esc 关闭。 */
   togglePomodoroPanel() {
     if (this.pomodoroPopover) return this.closePomodoroPanel();
+    if (this.dropStalePomodoroCycle()) void this.saveSettings();
     const anchor = this.statusBarEl;
     const doc = anchor?.ownerDocument;
     if (!doc?.body?.createDiv) return this.openPomodoroModal();
@@ -3089,6 +3126,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   /** 命令面板和手机端：用对话框打开同一个面板。 */
   openPomodoroModal() {
+    if (this.dropStalePomodoroCycle()) void this.saveSettings();
     const Modal = obsidian.Modal;
     if (typeof Modal !== "function") return;
     const modal = new Modal(this.app);
@@ -3173,11 +3211,29 @@ class CrispFocusPlugin extends obsidian.Plugin {
       task: focusTaskContext(meta.task),
       ...extra,
     };
+    this.logEndedSession(payload);
     try {
       this.app?.workspace?.trigger?.("crisp-focus:session", payload);
     } catch (error) {
       console.error("[Crisp Focus] session event listener failed", error);
     }
+  }
+
+  /* 结束的专注在事件发出之前记进日志，紧接着的写盘把它存下来；不到 1 分钟就结束的是误触，不记。
+     监听方在事件里就能从日志读到这一段。 */
+  logEndedSession(payload) {
+    if (payload.kind !== "focus" || (payload.type !== "complete" && payload.type !== "stop")) return;
+    if (payload.type === "stop" && !((Number(payload.elapsedMs) || 0) >= 60000)) return;
+    this.settings.sessionLogSeq = (this.settings.sessionLogSeq || 0) + 1;
+    payload.seq = this.settings.sessionLogSeq;
+    const log = Array.isArray(this.settings.sessionLog) ? this.settings.sessionLog : [];
+    this.settings.sessionLog = [...log, { ...payload }].slice(-SESSION_LOG_LIMIT);
+  }
+
+  /** 最近结束的专注，按 seq 从旧到新；返回副本。Crisp Tempo、Crisp Pulse 按会话 id 去重后补记。 */
+  getSessionLog() {
+    const sessions = (this.settings.sessionLog || []).map((entry) => ({ ...entry, task: entry.task ? { ...entry.task } : null }));
+    return { apiVersion: FOCUS_API_VERSION, sessions };
   }
 
   /** 番茄钟当前状态，供面板和其他插件读取。 */

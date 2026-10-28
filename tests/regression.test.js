@@ -2243,7 +2243,7 @@ test("a pomodoro cycle alternates focus and breaks, with a long break after the 
   assert.deepEqual(chimes, ["focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end", "focus-end", "break-end"]);
   const completes = events.filter((e) => e.type === "complete");
   assert.deepEqual(completes.map((e) => `${e.kind}:${e.round}`), ["focus:1", "break:1", "focus:2", "break:2", "focus:3", "break:3", "focus:4", "break:4"]);
-  assert.ok(events.every((e) => e.apiVersion === 2 && e.notePath === "notes/draft.md" && e.task === null));
+  assert.ok(events.every((e) => e.apiVersion === 3 && e.notePath === "notes/draft.md" && e.task === null));
   plugin.onunload();
 });
 
@@ -2336,13 +2336,13 @@ const TEMPO_TASK = { source: "crisp-tempo", id: "task-1760000000000-ab12", title
 
 test("every event of a task-bound pomodoro cycle names the task", async () => {
   const { plugin, events, finish } = await pomodoroPlugin();
-  assert.equal(plugin.focusApiVersion, 2);
+  assert.equal(plugin.focusApiVersion, 3);
   await plugin.startPomodoro({ task: TEMPO_TASK });
   await finish();
   await plugin.skipPomodoroBreak();
   await plugin.endPomodoro();
   assert.deepEqual(events.map((e) => `${e.type}:${e.kind}:${e.round}`), ["start:focus:1", "complete:focus:1", "start:break:1", "skip:break:1", "start:focus:2", "stop:focus:2"]);
-  assert.ok(events.every((e) => e.apiVersion === 2 && e.task && e.task.id === TEMPO_TASK.id && e.task.source === "crisp-tempo" && e.task.title === "修复转写回链"));
+  assert.ok(events.every((e) => e.apiVersion === 3 && e.task && e.task.id === TEMPO_TASK.id && e.task.source === "crisp-tempo" && e.task.title === "修复转写回链"));
   await plugin.startPomodoro();
   assert.equal(events.at(-1).task, null, "不带任务开始的新一轮不沿用上一轮的任务");
   assert.equal(plugin.getPomodoroSnapshot().task, null);
@@ -2931,4 +2931,142 @@ test("stopping ambient while it is still loading leaves no decoded buffer behind
   assert.equal(engine.ambientBuffer, null);
   assert.equal(context.ambientSources.length, 0);
   assert.equal(context.calls.bufferCreations, 0, "a stale load does not build the loop copy");
+});
+
+/* 打磨（1.8.3）。失败模式：
+   - 昨天停在「休息结束、等开始下一个」的一轮番茄，第二天还显示「下一个番茄 · 2/4」，而今天的计数已经归零。
+   - 设置页开着时从状态栏、命令或番茄阶段切换改了会话，设置页的按钮和剩余时间停在旧状态。 */
+test("a pomodoro cycle left waiting on an earlier day starts fresh", async () => {
+  const waitingSaved = {
+    sessionState: { status: "idle", endAt: 0, remainingMs: 0 },
+    pomodoroState: { active: true, round: 1, cycleId: "c", waiting: true, task: null },
+    pomodoroToday: { date: "2000-01-01", count: 1, focusMinutes: 25 },
+  };
+  const stale = await pomodoroPlugin({ saved: waitingSaved });
+  assert.equal(stale.plugin.settings.pomodoroState, null);
+  assert.equal(stale.plugin.getPomodoroSnapshot().waiting, false);
+  assert.equal(stale.plugin.statusBarEl.textContent, "专注");
+  assert.equal(stale.persisted()?.pomodoroState, null, "dropping the stale cycle is saved");
+  stale.plugin.onunload();
+
+  // Obsidian left open overnight: opening the panel the next day drops the cycle too.
+  const overnight = await pomodoroPlugin();
+  await overnight.plugin.startPomodoro();
+  await overnight.finish();
+  await overnight.finish();
+  assert.equal(overnight.plugin.getPomodoroSnapshot().waiting, true);
+  overnight.plugin.settings.pomodoroToday.date = "2000-01-01";
+  overnight.plugin.openPomodoroModal();
+  assert.equal(overnight.plugin.settings.pomodoroState, null);
+  assert.equal(overnight.plugin.statusBarEl.textContent, "专注");
+  overnight.plugin.onunload();
+});
+
+test("settings session controls follow sessions changed from elsewhere", async () => {
+  const { plugin, finish } = await pomodoroPlugin();
+  const tab = plugin.settingTab;
+  let renders = 0;
+  tab.containerEl = { isConnected: true };
+  tab.sessionControlSetting = { setDesc() {} };
+  tab.display = () => { renders += 1; };
+
+  await plugin.startFocusSession(25);
+  assert.ok(renders >= 1, "start redraws the controls");
+  let before = renders;
+  plugin.session.tick();
+  assert.equal(renders, before, "a tick only updates the remaining time");
+  await plugin.pauseFocusSession();
+  assert.ok(renders > before, "pause redraws the controls");
+  before = renders;
+  await plugin.stopFocusSession();
+  assert.ok(renders > before, "stop redraws the controls");
+  before = renders;
+  await plugin.startPomodoro();
+  await finish();
+  assert.ok(renders > before, "a phase change redraws the controls");
+  plugin.onunload();
+});
+
+/* 会话日志（1.9.0，focusApiVersion 3）。失败模式：
+   - Tempo / Pulse 停用、还没加载或写盘失败时结束的专注，事件发过就没了，之后补不回来。
+   - 日志在事件之后才写：监听方在事件里读日志，读不到刚结束的这段。
+   - 开始、暂停、休息、不到 1 分钟的误触也进日志，挤掉真正的记录。
+   - 重载后 seq 从头数，或坏条目让整份设置读不进来。 */
+test("ended focus sessions are logged before their event and persisted", async () => {
+  const { plugin, events, finish, persisted } = await pomodoroPlugin();
+  const inLogAtEvent = new Map();
+  const trigger = plugin.app.workspace.trigger;
+  plugin.app.workspace.trigger = (name, payload) => {
+    if (name === "crisp-focus:session" && payload.kind === "focus" && (payload.type === "stop" || payload.type === "complete")) {
+      inLogAtEvent.set(payload.id, plugin.getSessionLog().sessions.some((s) => s.id === payload.id));
+    }
+    trigger(name, payload);
+  };
+  try {
+    assert.equal(plugin.focusApiVersion, 3);
+    await plugin.startFocusSession(25, { task: { source: "crisp-tempo", id: "task-1", title: "Write" } });
+    const first = plugin.settings.sessionMeta.id;
+    plugin.elapsedMs = () => 30 * 1000;
+    await plugin.stopFocusSession(); // under a minute: a misclick, not logged
+
+    await plugin.startFocusSession(25, { task: { source: "crisp-tempo", id: "task-1", title: "Write" } });
+    const second = plugin.settings.sessionMeta.id;
+    await plugin.pauseFocusSession();
+    await plugin.resumeFocusSession();
+    plugin.elapsedMs = () => 7 * 60 * 1000;
+    await plugin.stopFocusSession();
+    delete plugin.elapsedMs;
+
+    await plugin.startPomodoro();
+    const third = plugin.settings.sessionMeta.id;
+    await finish(); // focus completes, a break starts
+    await finish(); // the break completes: not a focus session
+
+    const log = plugin.getSessionLog();
+    assert.equal(log.apiVersion, 3);
+    assert.deepEqual(JSON.parse(JSON.stringify(log.sessions.map((s) => [s.id, s.type, s.seq]))), [[second, "stop", 1], [third, "complete", 2]]);
+    assert.ok(!log.sessions.some((s) => s.id === first));
+    assert.equal(log.sessions[0].elapsedMs, 7 * 60 * 1000);
+    assert.deepEqual({ ...log.sessions[0].task }, { source: "crisp-tempo", id: "task-1", title: "Write" });
+    assert.equal(inLogAtEvent.get(second), true, "the log already holds a session when its end event fires");
+    assert.equal(inLogAtEvent.get(third), true);
+    assert.equal(inLogAtEvent.get(first), false);
+    assert.equal(events.find((e) => e.id === third && e.type === "complete").seq, 2, "the end event carries its seq");
+
+    log.sessions[0].id = "tampered";
+    assert.equal(plugin.getSessionLog().sessions[0].id, second, "callers get copies");
+    assert.deepEqual(persisted().sessionLog.map((s) => s.seq), [1, 2], "the log is written with the settings");
+    assert.equal(persisted().sessionLogSeq, 2);
+  } finally { plugin.onunload(); }
+});
+
+test("the session log survives a reload, drops damaged entries and keeps the newest 300", async () => {
+  const good = (seq) => ({ apiVersion: 3, type: "complete", id: `s-${seq}`, kind: "focus", plannedMinutes: 25, startedAt: 1, at: 2, completed: true, elapsedMs: 1500000, task: null, seq });
+  const saved = {
+    sessionLog: [good(1), null, { id: 5 }, { ...good(2), seq: "x" }, good(3)],
+    sessionLogSeq: 3,
+  };
+  const reloaded = await pomodoroPlugin({ saved });
+  try {
+    assert.deepEqual([...reloaded.plugin.getSessionLog().sessions.map((s) => s.seq)], [1, 3]);
+    await reloaded.plugin.startFocusSession(25);
+    await reloaded.finish();
+    assert.equal(reloaded.plugin.getSessionLog().sessions.at(-1).seq, 4, "numbering continues after a reload");
+  } finally { reloaded.plugin.onunload(); }
+
+  const lostCounter = await pomodoroPlugin({ saved: { sessionLog: [good(8)] } });
+  try {
+    await lostCounter.plugin.startFocusSession(25);
+    await lostCounter.finish();
+    assert.equal(lostCounter.plugin.getSessionLog().sessions.at(-1).seq, 9, "a missing counter resumes after the newest entry");
+  } finally { lostCounter.plugin.onunload(); }
+
+  const full = await pomodoroPlugin({ saved: { sessionLog: Array.from({ length: 300 }, (_, i) => good(i + 1)), sessionLogSeq: 300 } });
+  try {
+    await full.plugin.startFocusSession(25);
+    await full.finish();
+    const seqs = full.plugin.getSessionLog().sessions.map((s) => s.seq);
+    assert.equal(seqs.length, 300);
+    assert.deepEqual([seqs[0], seqs.at(-1)], [2, 301]);
+  } finally { full.plugin.onunload(); }
 });

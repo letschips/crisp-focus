@@ -71,6 +71,14 @@ Tempo uses this to start focus from a task and record the time on it. A pomodoro
 keeps the task for the whole cycle; starting another session ends the running
 one under its own task. The panel shows the task title.
 
+From `focusApiVersion` 3 (1.9.0), every focus session that completes, or ends
+early after at least a minute, is added to a session log before its end event
+fires, and the end event carries the entry's `seq`. `getSessionLog()` returns
+`{ apiVersion, sessions }`: copies of the last 300 entries, oldest first, each the
+end event's fields plus `seq`. A plugin that was disabled or reloading when a
+session ended can read the log later and record what it missed, deduplicating
+by session `id`. Breaks are not logged.
+
 ## License verification and privacy
 
 The animated cursor and single focus sessions are available without
