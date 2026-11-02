@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.1
+
+- 变更：优化布局
+
 ## 1.9.0
 
 - 结束的专注（完成，或中途结束但满 1 分钟）记进会话日志，保留最近 300 段；新增 `getSessionLog()`，`focusApiVersion` 升到 3，结束事件带 `seq`。Crisp Tempo、Crisp Pulse 停用或重载期间结束的专注，之后可以照日志补记。

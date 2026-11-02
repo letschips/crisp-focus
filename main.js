@@ -1958,9 +1958,9 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new obsidian.Setting(containerEl)
-      .setName("Crisp Focus")
-      .setHeading();
+    const brandHeader = containerEl.createDiv({ cls: "crisp-brand-header" });
+    brandHeader.createEl("h2", { text: "Crisp Focus" });
+    containerEl.createEl("p", { text: "坐下来，专心写", cls: "crisp-brand-slogan" });
 
     new obsidian.Setting(containerEl)
       .setName("专注模式")
