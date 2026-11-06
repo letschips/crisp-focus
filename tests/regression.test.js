@@ -338,6 +338,22 @@ module.exports.__test = {
   pomodoroViewModel: typeof pomodoroViewModel === "function" ? pomodoroViewModel : undefined,
   nextPomodoroBreak: typeof nextPomodoroBreak === "function" ? nextPomodoroBreak : undefined,
   CRISP_LICENSE_PRODUCTS,
+  focusEntitled,
+  entitle: (target, on = true) => {
+    const manager = focusLicenseManagerFor(target, {});
+    setFocusLicense(manager, on ? { valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], userName: "Test user" } } : { valid: false, reason: "revoked" });
+    return target;
+  },
+};
+// Test-only access to the module-private license hooks, attached to every plugin built here.
+module.exports.__test.CrispFocusPlugin = class extends CrispFocusPlugin {
+  constructor(...args) {
+    super(...args);
+    Object.defineProperty(this, "__focusTest", { value: {
+      overrideVerifier: (fn) => FOCUS_VERIFIER_OVERRIDES.set(this, fn),
+      entitle: (on = true) => module.exports.__test.entitle(this, on),
+    } });
+  }
 };`;
   const timers = [];
   const audioElements = [];
@@ -595,21 +611,20 @@ test("an unlicensed paid scene is rejected without changing the current setup", 
   plugin.onunload();
 });
 
-test("the free silent scene remains available without a license", async () => {
+test("1.10 every scene, including silent writing, needs a license", async () => {
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
   plugin.app = createPluginApp(windowObject);
-  plugin.loadData = async () => ({ ambientSound: "rain", typewriterAudioEnabled: true });
+  plugin.loadData = async () => ({ ambientSound: "rain", typewriterAudioEnabled: true, activeSceneId: "custom" });
   plugin.saveData = async () => {};
   await plugin.onload();
 
   const result = await plugin.applyScene("silent-writing");
 
-  assert.equal(result.applied, true);
-  assert.equal(plugin.settings.activeSceneId, "silent-writing");
-  assert.equal(plugin.settings.typewriterAudioEnabled, false);
-  assert.equal(plugin.settings.ambientSound, "off");
+  assert.equal(result.applied, false);
+  assert.equal(plugin.settings.activeSceneId, "custom");
+  assert.equal(plugin.settings.ambientSound, "rain");
   plugin.onunload();
 });
 
@@ -737,6 +752,7 @@ test("plugin session controls keep focus mode, persisted state, and status text 
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({ sessionDurationMinutes: 25 });
   plugin.saveData = async () => {};
@@ -803,7 +819,7 @@ function createPluginApp(windowObject) {
 }
 
 function grantTestLicense(plugin) {
-  plugin.licenseVerifier = async () => ({
+  plugin.__focusTest.overrideVerifier(async () => ({
     valid: true,
     source: "online",
     payload: {
@@ -811,7 +827,7 @@ function grantTestLicense(plugin) {
       features: ["all"],
       userName: "Test user",
     },
-  });
+  }));
 }
 
 test("default typewriter Backspace sound completes without throwing", () => {
@@ -852,7 +868,7 @@ test("saved ambient volume zero remains zero at runtime", async () => {
 });
 
 test("disabling and uninstalling animated cursor removes editor styling", () => {
-  const { patchCursorLayer } = loadPluginInternals();
+  const { patchCursorLayer, entitle } = loadPluginInternals();
   const editor = {
     classList: createClassList(),
     style: createStyle(),
@@ -875,6 +891,7 @@ test("disabling and uninstalling animated cursor removes editor styling", () => 
       focusModeEnabled: true,
     },
   };
+  entitle(plugin);
   const uninstall = patchCursorLayer({ layer }, plugin);
 
   let markers = layer.markers({ dom: editor });
@@ -898,7 +915,7 @@ test("disabling and uninstalling animated cursor removes editor styling", () => 
 });
 
 test("empty CM6 cursor layers keep the native caret visible", () => {
-  const { patchCursorLayer } = loadPluginInternals();
+  const { patchCursorLayer, entitle } = loadPluginInternals();
   const editor = {
     classList: createClassList(),
     style: createStyle(),
@@ -916,6 +933,7 @@ test("empty CM6 cursor layers keep the native caret visible", () => {
       focusModeEnabled: true,
     },
   };
+  entitle(plugin);
   const uninstall = patchCursorLayer({ layer }, plugin);
 
   const markers = layer.markers({ dom: editor });
@@ -993,6 +1011,7 @@ test("IME confirmation produces exactly one confirmation sound", async () => {
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({ typewriterAudioEnabled: true });
   plugin.saveData = async () => {};
@@ -1289,6 +1308,7 @@ test("typing audio follows pop-out window lifecycle", async () => {
   const { windowObject: mainWindow } = createWindow();
   const { windowObject: popoutWindow } = createWindow();
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createPluginApp(mainWindow);
   plugin.loadData = async () => ({ typewriterAudioEnabled: true });
   plugin.saveData = async () => {};
@@ -1428,6 +1448,7 @@ test("iOS screen keyboard: beforeinput insertText plays character sound without 
 
   let charSounds = 0;
   const plugin = new CrispFocusPlugin();
+  plugin.__focusTest.entitle();
   plugin.settings = {
     focusModeEnabled: true,
     typewriterAudioEnabled: true,
@@ -1473,9 +1494,8 @@ test("iOS screen keyboard: beforeinput insertText plays character sound without 
 });
 
 test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
-  const { CrispTypewriterEngine } = loadPluginInternals();
+  const { CrispTypewriterEngine, entitle } = loadPluginInternals();
   const mockPlugin = {
-    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1484,6 +1504,7 @@ test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
       typewriterScrollTolerance: 10, // band: 320px ~ 520px
     },
   };
+  entitle(mockPlugin);
   const engine = new CrispTypewriterEngine(mockPlugin);
 
   function createMockView(cursorTop) {
@@ -1516,9 +1537,8 @@ test("TypewriterEngine: Soft mode maintains cursor in tolerance band", () => {
 });
 
 test("TypewriterEngine: Strict mode locks cursor precisely to target height", () => {
-  const { CrispTypewriterEngine } = loadPluginInternals();
+  const { CrispTypewriterEngine, entitle } = loadPluginInternals();
   const mockPlugin = {
-    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1526,6 +1546,7 @@ test("TypewriterEngine: Strict mode locks cursor precisely to target height", ()
       typewriterScrollOffset: 42, // target: 420px in 1000px height
     },
   };
+  entitle(mockPlugin);
   const engine = new CrispTypewriterEngine(mockPlugin);
 
   function createMockView(cursorTop) {
@@ -1549,10 +1570,9 @@ test("TypewriterEngine: Strict mode locks cursor precisely to target height", ()
 });
 
 test("TypewriterEngine: user scroll pause and resume on user activity", () => {
-  const { CrispTypewriterEngine } = loadPluginInternals();
+  const { CrispTypewriterEngine, entitle } = loadPluginInternals();
   let scheduledScroll = null;
   const mockPlugin = {
-    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1565,6 +1585,7 @@ test("TypewriterEngine: user scroll pause and resume on user activity", () => {
       clearTimeout: (id) => clearTimeout(id),
     },
   };
+  entitle(mockPlugin);
   const engine = new CrispTypewriterEngine(mockPlugin);
 
   const mockView = {
@@ -1601,10 +1622,9 @@ test("TypewriterEngine: user scroll pause and resume on user activity", () => {
 });
 
 test("TypewriterEngine: reduced-motion preference disables smooth scrolling", () => {
-  const { CrispTypewriterEngine } = loadPluginInternals();
+  const { CrispTypewriterEngine, entitle } = loadPluginInternals();
   let smoothScrollCalls = 0;
   const mockPlugin = {
-    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1618,6 +1638,7 @@ test("TypewriterEngine: reduced-motion preference disables smooth scrolling", ()
       },
     },
   };
+  entitle(mockPlugin);
   const engine = new CrispTypewriterEngine(mockPlugin);
   const mockView = {
     dom: { ownerDocument: { defaultView: mockPlugin.mainWindow } },
@@ -1648,7 +1669,7 @@ test("Typewriter ViewPlugin distinguishes user scroll intent from programmatic s
       },
     },
   };
-  const { createTypewriterExtension } = loadPluginInternals({ codemirrorView });
+  const { createTypewriterExtension, entitle } = loadPluginInternals({ codemirrorView });
   const listeners = new Map();
   const scrollDOM = {
     clientHeight: 800,
@@ -1669,7 +1690,6 @@ test("Typewriter ViewPlugin distinguishes user scroll intent from programmatic s
   };
   let userScrollSignals = 0;
   const plugin = {
-    licenseManager: { isEntitled: () => true },
     mainWindow: windowObject,
     settings: {
       focusModeEnabled: true,
@@ -1680,6 +1700,7 @@ test("Typewriter ViewPlugin distinguishes user scroll intent from programmatic s
     typewriterEngine: {
       onUserScroll() {
         userScrollSignals += 1;
+  entitle(plugin);
       },
     },
   };
@@ -1789,9 +1810,8 @@ test("Typewriter styles and toggle commands update editor classes and CSS variab
 });
 
 test("TypewriterEngine: skips canvas nodes, modal prompts, and protects text range selections", () => {
-  const { CrispTypewriterEngine } = loadPluginInternals();
+  const { CrispTypewriterEngine, entitle } = loadPluginInternals();
   const mockPlugin = {
-    licenseManager: { isEntitled: () => true },
     settings: {
       focusModeEnabled: true,
       typewriterScrollEnabled: true,
@@ -1799,6 +1819,7 @@ test("TypewriterEngine: skips canvas nodes, modal prompts, and protects text ran
       typewriterScrollOffset: 42,
     },
   };
+  entitle(mockPlugin);
   const engine = new CrispTypewriterEngine(mockPlugin);
 
   // 1. Canvas node editor view -> delta should be 0
@@ -2053,15 +2074,15 @@ test('a session that expired while Obsidian was closed is cleared from saved sta
 
 test('pointer-driven selections do not scroll the typewriter viewport under the mouse', () => {
   const codemirrorView = { ViewPlugin: { fromClass: (C) => C } };
-  const { createTypewriterExtension } = loadPluginInternals({ codemirrorView });
+  const { createTypewriterExtension, entitle } = loadPluginInternals({ codemirrorView });
   const windowObject = { cancelAnimationFrame() {}, requestAnimationFrame(cb) { cb(); return 1; } };
   let scrolls = 0;
   const plugin = {
-    licenseManager: { isEntitled: () => true },
     mainWindow: windowObject,
     settings: { focusModeEnabled: true, typewriterScrollEnabled: true, typewriterScrollOffset: 42 },
     typewriterEngine: { onUserActivity() {}, onUserScroll() {}, requestScroll() { scrolls += 1; } },
   };
+  entitle(plugin);
   const view = {
     dom: { classList: createClassList(), closest: () => null, ownerDocument: { defaultView: windowObject }, querySelector: () => null, style: createStyle() },
     scrollDOM: { addEventListener() {}, removeEventListener() {} },
@@ -2278,14 +2299,47 @@ test("ending mid-focus reports an interrupted session; skipping a break starts t
   plugin.onunload();
 });
 
-test("pomodoro requires activation while a single focus session stays free", async () => {
+test("1.10 pomodoro and single focus sessions both require activation", async () => {
   const { plugin, events } = await pomodoroPlugin({ licensed: false });
   assert.equal(await plugin.startPomodoro(), null);
+  assert.equal(await plugin.startFocusSession(25), null);
   assert.equal(plugin.session.getSnapshot().status, "idle");
-  await plugin.startFocusSession(25);
-  assert.equal(plugin.session.getSnapshot().status, "running");
-  assert.equal(events.at(-1).pomodoro, false);
-  assert.equal(plugin.statusBarEl.textContent, "专注 25:00");
+  assert.equal(events.length, 0);
+  assert.equal(plugin.statusBarEl.classList.contains("is-locked"), true, "status bar entry is hidden");
+  plugin.onunload();
+});
+
+test("1.10 unactivated Focus mode has no effect even with the switch on", async () => {
+  const { CrispFocusPlugin, focusEntitled } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ focusModeEnabled: true, typewriterAudioEnabled: true, ambientSound: "rain" });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  let sounds = 0;
+  plugin.audio.playCharKey = () => { sounds += 1; };
+  windowObject.dispatch("keydown", { altKey: false, ctrlKey: false, key: "a", metaKey: false });
+  assert.equal(focusEntitled(plugin), false);
+  assert.equal(sounds, 0);
+  assert.deepEqual(plugin.app.vault.adapter.binaryReads || [], [], "ambient audio never loads");
+  plugin.onunload();
+});
+
+test("1.10 status fields, prototype patches and a licenseVerifier property cannot unlock", async () => {
+  const { CrispFocusPlugin, focusEntitled } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  plugin.licenseVerifier = async () => ({ valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"] } });
+  plugin.app = createPluginApp(windowObject);
+  plugin.loadData = async () => ({ licenseCode: "forged.code" });
+  plugin.saveData = async () => {};
+  await plugin.onload();
+  assert.equal(focusEntitled(plugin), false, "the old test hook is not read in production");
+  plugin.licenseManager.status = { valid: true, payload: { product: "Crisp Suite" } };
+  Object.getPrototypeOf(plugin.licenseManager).isEntitled = () => true;
+  assert.equal(focusEntitled(plugin), false);
+  assert.equal((await plugin.applyScene("silent-writing")).applied, false);
   plugin.onunload();
 });
 
@@ -2350,7 +2404,7 @@ test("every event of a task-bound pomodoro cycle names the task", async () => {
 });
 
 test("switching tasks closes the running session under the old task", async () => {
-  const { plugin, events } = await pomodoroPlugin({ licensed: false });
+  const { plugin, events } = await pomodoroPlugin();
   await plugin.startFocusSession(undefined, { task: TEMPO_TASK });
   assert.equal(plugin.settings.sessionMeta.plannedMinutes, 25, "不给时长就用设置里的时长");
   assert.equal(plugin.getPomodoroSnapshot().task.title, "修复转写回链");
@@ -2367,7 +2421,7 @@ test("switching tasks closes the running session under the old task", async () =
 });
 
 test("task context from another plugin is validated before it reaches events", async () => {
-  const { plugin, events } = await pomodoroPlugin({ licensed: false });
+  const { plugin, events } = await pomodoroPlugin();
   const bad = [
     "task-1",
     { source: "Crisp Tempo", id: "task-1", title: "x" },
@@ -2425,9 +2479,9 @@ async function cleanTypingPlugin({ left = true, right = true, saved = {}, mobile
   windowObject.document.body = { classList: createClassList() };
   const plugin = new CrispFocusPlugin();
   const license = { valid: licensed };
-  plugin.licenseVerifier = async () => (license.valid
+  plugin.__focusTest.overrideVerifier(async () => (license.valid
     ? { valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], userName: "Test user" } }
-    : { valid: false, reason: "未激活" });
+    : { valid: false, reason: "未激活" }));
   plugin.app = createPluginApp(windowObject);
   const split = (open) => ({
     collapsed: !open,
@@ -2662,7 +2716,7 @@ test("skipping a break needs a valid license like starting the next pomodoro", a
     plugin.session.complete();
     await new Promise((r) => setImmediate(r));
     assert.equal(plugin.settings.sessionMeta.kind, "break");
-    plugin.licenseManager.status = { valid: false, reason: "revoked" };
+    plugin.__focusTest.entitle(false);
     assert.equal(await plugin.skipPomodoroBreak(), null);
     assert.equal(plugin.settings.sessionMeta.kind, "break", "the break keeps running");
   } finally { plugin.onunload(); }
@@ -2737,11 +2791,11 @@ test("a stale activation request never rolls back a newer successful one", async
   const plugin = new CrispFocusPlugin();
   plugin.app = createPluginApp(windowObject);
   const pending = {};
-  plugin.licenseVerifier = (code) => {
+  plugin.__focusTest.overrideVerifier((code) => {
     if (code === "old") return Promise.resolve({ valid: false, reason: "old revoked" });
     if (!code) return Promise.resolve({ valid: false, reason: "授权码为空" });
     return new Promise((resolve) => { pending[code] = resolve; });
-  };
+  });
   plugin.loadData = async () => ({ licenseCode: "old" });
   plugin.saveData = async () => {};
   await plugin.onload();
@@ -2782,6 +2836,7 @@ test("a save that never reaches data.json is reported instead of passing as succ
   const { windowObject } = createWindow();
   const files = new Map([[DATA_PATH, '{"ambientSound":"rain"}']]);
   const plugin = new CrispFocusPlugin();
+  grantTestLicense(plugin);
   plugin.app = createDataFileApp(windowObject, files).app;
   plugin.loadData = async () => ({ ambientSound: "rain" });
   plugin.saveData = async () => {}; // Obsidian 的 writeJson 吞掉写入异常后就是这样

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.9.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.9.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -52,8 +52,29 @@ function getCryptoSubtle(windowObj = window) {
     : null;
 }
 
-async function importEd25519PublicKey(pem, windowObj = window) {
-  const subtle = getCryptoSubtle(windowObj);
+// WebCrypto is taken once at load: replacing crypto.subtle later does not reach the license check.
+const FOCUS_SUBTLE = (() => {
+  try {
+    const subtle = getCryptoSubtle(typeof window !== "undefined" ? window : globalThis) || globalThis.crypto?.subtle || null;
+    return subtle ? Object.freeze({ importKey: subtle.importKey.bind(subtle), verify: subtle.verify.bind(subtle) }) : null;
+  } catch (e) { return null; }
+})();
+let FOCUS_SUBTLE_CHECK = null;
+// A verifier that accepts an all-zero signature is not a real verifier; no license is trusted then.
+function focusSubtleTrusted() {
+  FOCUS_SUBTLE_CHECK ||= (async () => {
+    if (!FOCUS_SUBTLE) return false;
+    try {
+      const key = await importEd25519PublicKey(CRISP_PUBLIC_KEY_PEM);
+      const accepted = await FOCUS_SUBTLE.verify("Ed25519", key, new Uint8Array(64), new TextEncoder().encode("crisp-focus/self-test"));
+      return accepted === false;
+    } catch (e) { return false; }
+  })();
+  return FOCUS_SUBTLE_CHECK;
+}
+
+async function importEd25519PublicKey(pem) {
+  const subtle = FOCUS_SUBTLE;
   if (!subtle) {
     throw new Error("当前 Obsidian 版本不支持 WebCrypto Ed25519");
   }
@@ -97,14 +118,15 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
         return { valid: false, reason: `授权已于 ${String(payload.expiresAt).split("T")[0]} 到期` };
       }
     }
-    const publicKey = await importEd25519PublicKey(CRISP_PUBLIC_KEY_PEM, windowObj);
-    const isValid = await getCryptoSubtle(windowObj).verify(
+    if (!(await focusSubtleTrusted())) return { valid: false, reason: "当前环境无法验证签名" };
+    const publicKey = await importEd25519PublicKey(CRISP_PUBLIC_KEY_PEM);
+    const isValid = await FOCUS_SUBTLE.verify(
       "Ed25519",
       publicKey,
       base64UrlToUint8Array(signatureBase64),
       new TextEncoder().encode(payloadBase64)
     );
-    if (!isValid) return { valid: false, reason: "授权签名无效" };
+    if (isValid !== true) return { valid: false, reason: "授权签名无效" };
     if (options.skipOnline) return { valid: true, payload, source: "offline" };
 
     try {
@@ -166,12 +188,74 @@ async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", ap
 
 const MAX_TIMER_DELAY = 0x7fffffff;
 
+// Entitlement lives in module-private maps. The manager's status is for display only; replacing
+// fields or prototype methods cannot grant access because every gate reads these maps.
+const FOCUS_LICENSE_STATE = new WeakMap();   // manager -> { expiry } when verified
+const FOCUS_LICENSE_VERIFIER = new WeakMap();
+const FOCUS_LICENSE_CLOCK = new WeakMap();
+const FOCUS_LICENSE_OWNER = new WeakMap();   // plugin -> manager
+const FOCUS_VERIFIER_OVERRIDES = new WeakMap(); // set only by the test harness
+
+function focusClock(manager) {
+  return (FOCUS_LICENSE_CLOCK.get(manager) || Date.now)();
+}
+
+function focusManagerActive(manager) {
+  const state = manager ? FOCUS_LICENSE_STATE.get(manager) : null;
+  if (!state) return false;
+  return state.expiry === null || state.expiry > focusClock(manager);
+}
+
+function setFocusLicense(manager, result) {
+  if (result?.valid === true) {
+    const time = result.payload?.expiresAt ? new Date(result.payload.expiresAt).getTime() : NaN;
+    FOCUS_LICENSE_STATE.set(manager, { expiry: Number.isFinite(time) ? time : null });
+  } else {
+    FOCUS_LICENSE_STATE.delete(manager);
+  }
+  // Display accessors must never influence the trusted verification result.
+  manager.status = { ...result };
+}
+
+/** The single gate every feature goes through. */
+function focusEntitled(plugin) {
+  if (!plugin || (typeof plugin !== "object" && typeof plugin !== "function")) return false;
+  return focusManagerActive(FOCUS_LICENSE_OWNER.get(plugin));
+}
+
+/** Focus effects run only while the switch is on and the license is verified. */
+function focusActive(plugin) {
+  return Boolean(plugin?.settings?.focusModeEnabled) && focusEntitled(plugin);
+}
+
+function focusLicenseManagerFor(plugin, options = {}) {
+  let manager = FOCUS_LICENSE_OWNER.get(plugin);
+  if (!manager) {
+    manager = new CrispFocusLicenseManager(plugin.app, plugin.settings, options);
+    FOCUS_LICENSE_OWNER.set(plugin, manager);
+  } else {
+    manager.app = plugin.app;
+    manager.settings = plugin.settings;
+    if (options.onEntitlementLost) manager.onEntitlementLost = options.onEntitlementLost;
+  }
+  plugin.licenseManager = manager;
+  return manager;
+}
+
+async function runFocusVerifier(manager, code, options) {
+    try {
+      return await FOCUS_LICENSE_VERIFIER.get(manager)(code, "crisp-focus", manager.app, manager.windowObj, options);
+    } catch (error) {
+      return { valid: false, reason: `授权验证失败: ${error.message || error}` };
+    }
+  }
+
 class CrispFocusLicenseManager {
   constructor(app, settings, options = {}) {
     this.app = app;
     this.settings = settings;
-    this.verifier = options.verifier || verifyLicenseCode;
-    this.now = options.now || (() => Date.now());
+    FOCUS_LICENSE_VERIFIER.set(this, options.verifier || verifyLicenseCode);
+    FOCUS_LICENSE_CLOCK.set(this, options.now || (() => Date.now()));
     this.onEntitlementLost = options.onEntitlementLost || (() => {});
     this.windowObj = options.windowObj || window;
     this.setTimer = options.setTimeout || ((fn, delay) => this.windowObj.setTimeout(fn, delay));
@@ -184,16 +268,11 @@ class CrispFocusLicenseManager {
   }
 
   isEntitled() {
-    if (this.status.valid !== true) return false;
-    const expiresAt = this.expiryTime();
-    return expiresAt === null || expiresAt > this.now();
+    return focusManagerActive(this);
   }
 
   expiryTime() {
-    const raw = this.status.valid === true ? this.status.payload?.expiresAt : null;
-    if (!raw) return null;
-    const time = new Date(raw).getTime();
-    return Number.isFinite(time) ? time : null;
+    return FOCUS_LICENSE_STATE.get(this)?.expiry ?? null;
   }
 
   // 应用一直开着跨过到期时间时，到点发出失效通知，让各功能收尾。
@@ -205,7 +284,7 @@ class CrispFocusLicenseManager {
     }
     const expiresAt = this.expiryTime();
     if (expiresAt === null) return;
-    const delay = expiresAt - this.now();
+    const delay = expiresAt - focusClock(this);
     if (delay <= 0) {
       this.expire();
       return;
@@ -213,14 +292,15 @@ class CrispFocusLicenseManager {
     const clamped = delay + 1000 > MAX_TIMER_DELAY;
     this.expiryTimer = this.setTimer(() => {
       this.expiryTimer = null;
-      if (this.expiryTime() !== null && this.expiryTime() <= this.now()) this.expire();
+      if (this.expiryTime() !== null && this.expiryTime() <= focusClock(this)) this.expire();
       else if (clamped) this.scheduleExpiry();
     }, clamped ? MAX_TIMER_DELAY : delay + 1000);
   }
 
   expire() {
-    if (this.status.valid !== true) return;
-    this.status = { valid: false, reason: `授权已于 ${String(this.status.payload.expiresAt).split("T")[0]} 到期` };
+    if (!FOCUS_LICENSE_STATE.get(this)) return;
+    const raw = this.status?.payload?.expiresAt;
+    setFocusLicense(this, { valid: false, reason: `授权已于 ${String(raw).split("T")[0]} 到期` });
     this.onEntitlementLost(this.status);
   }
 
@@ -233,11 +313,12 @@ class CrispFocusLicenseManager {
     return this.status;
   }
 
+
   async initialize() {
     const id = ++this.verificationId;
-    const result = await this.verifier(this.settings.licenseCode, "crisp-focus", this.app, this.windowObj, { skipOnline: true });
+    const result = await runFocusVerifier(this, this.settings.licenseCode, { skipOnline: true });
     if (id !== this.verificationId) return { valid: false, stale: true, reason: "授权校验已被更新" };
-    this.status = result;
+    setFocusLicense(this, result);
     this.scheduleExpiry();
     if (result.valid) this.backgroundVerification = this.verify();
     return result;
@@ -245,22 +326,17 @@ class CrispFocusLicenseManager {
 
   async verify(code = this.settings.licenseCode) {
     const id = ++this.verificationId;
-    const wasEntitled = this.isEntitled();
-    let result;
-    try {
-      result = await this.verifier(code, "crisp-focus", this.app, this.windowObj);
-    } catch (error) {
-      result = { valid: false, reason: `授权验证失败: ${error.message || error}` };
-    }
+    const wasEntitled = focusManagerActive(this);
+    const result = await runFocusVerifier(this, code, undefined);
 
     if (id !== this.verificationId) return { valid: false, stale: true, reason: "授权校验已被更新" };
 
     if (result.valid && result.source === "online") {
-      this.settings.licenseLastOnlineAt = this.now();
+      this.settings.licenseLastOnlineAt = focusClock(this);
     }
 
-    this.status = result;
-    if (wasEntitled && !this.isEntitled()) {
+    setFocusLicense(this, result);
+    if (wasEntitled && !focusManagerActive(this)) {
       this.onEntitlementLost(result);
     }
     this.scheduleExpiry();
@@ -994,7 +1070,7 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
   const unpatch = around(layer, {
     mount: () => function () {},
     update: () => function (update, dom) {
-      if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
+      if (!focusActive(plugin) || !plugin.settings.animatedCursorEnabled) {
         return false;
       }
       const cell = update && update.state ? getActiveTableCell(update.state) : null;
@@ -1014,7 +1090,7 @@ function patchCursorLayer(cursorPluginInstance, plugin) {
     },
     markers: (origMarkers) => function (view) {
       const origResult = origMarkers ? origMarkers.call(this, view) : [];
-      if (!plugin.settings.focusModeEnabled || !plugin.settings.animatedCursorEnabled) {
+      if (!focusActive(plugin) || !plugin.settings.animatedCursorEnabled) {
         cleanupEditor(view && view.dom);
         return origResult;
       }
@@ -1274,7 +1350,7 @@ function isTypewriterActive(plugin) {
   return Boolean(
     settings?.focusModeEnabled
     && settings?.typewriterScrollEnabled
-    && plugin?.licenseManager?.isEntitled?.()
+    && focusEntitled(plugin)
   );
 }
 
@@ -1396,7 +1472,7 @@ function createTypewriterExtension(plugin) {
 
     applyEditorStyles() {
       if (!this.view || !this.view.dom) return;
-      applyTypewriterStylesToEditor(this.view.dom, plugin.settings, plugin.licenseManager?.isEntitled?.());
+      applyTypewriterStylesToEditor(this.view.dom, plugin.settings, focusEntitled(plugin));
     }
 
     destroy() {
@@ -1961,6 +2037,12 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     const brandHeader = containerEl.createDiv({ cls: "crisp-brand-header" });
     brandHeader.createEl("h2", { text: "Crisp Focus" });
     containerEl.createEl("p", { text: "坐下来，专心写", cls: "crisp-brand-slogan" });
+    if (!focusEntitled(this.plugin)) {
+      containerEl.createEl("p", {
+        cls: "crisp-focus-locked-note",
+        text: "Crisp Focus 未激活：专注模式、光标、打字音、环境音、专注会话和番茄钟都需要激活后使用。授权码在页面底部填写。",
+      });
+    }
 
     new obsidian.Setting(containerEl)
       .setName("专注模式")
@@ -2028,7 +2110,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(sceneGroup)
       .setName("当前场景")
-      .setDesc(this.plugin.licenseManager.isEntitled() ? "" : "打字机定焦和带音效的场景需要激活")
+      .setDesc(focusEntitled(this.plugin) ? "" : "打字机定焦和带音效的场景需要激活")
       .addDropdown((dropdown) => {
         dropdown.addOption("custom", "自定义（当前设置）");
         Object.entries(FOCUS_SCENES).forEach(([sceneId, scene]) => {
@@ -2051,7 +2133,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const cleanGroup = createGroup(
       "清爽打字",
-      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
+      focusEntitled(this.plugin) ? "" : "需要激活",
       true
     );
 
@@ -2138,7 +2220,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     const pomodoroGroup = createGroup(
       "番茄钟",
-      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
+      focusEntitled(this.plugin) ? "" : "需要激活",
       true
     );
     const numberSetting = (name, desc, key, fallback, min, max) => new obsidian.Setting(pomodoroGroup)
@@ -2339,7 +2421,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     // Card 2: Typewriter Scrolling Engine
     const typewriterCard = createGroup(
       "打字机定焦",
-      this.plugin.licenseManager.isEntitled() ? "" : "需要激活",
+      focusEntitled(this.plugin) ? "" : "需要激活",
       true
     );
 
@@ -2458,7 +2540,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         toggle
           .setValue(this.plugin.settings.typewriterAudioEnabled)
           .onChange(async (val) => {
-            if (val && !this.plugin.licenseManager.isEntitled()) {
+            if (val && !focusEntitled(this.plugin)) {
               new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
               this.plugin.settings.typewriterAudioEnabled = false;
               await this.plugin.saveSettings();
@@ -2482,7 +2564,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .addOption("woodenFish", "🪵 Zen Wooden Fish (功德木鱼与磬)")
           .setValue(this.plugin.settings.soundTheme || "typewriter")
           .onChange(async (val) => {
-            if (!this.plugin.licenseManager.isEntitled()) {
+            if (!focusEntitled(this.plugin)) {
               new obsidian.Notice("🔒 切换音效主题属于 Crisp 激活用户专属功能");
               this.display();
               return;
@@ -2551,7 +2633,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .addOption("wind", "❄️ Arctic Cold Wind (极地寒风呼啸)")
           .setValue(this.plugin.settings.ambientSound || "off")
           .onChange(async (val) => {
-            if (val !== "off" && !this.plugin.licenseManager.isEntitled()) {
+            if (val !== "off" && !focusEntitled(this.plugin)) {
               new obsidian.Notice("🔒 播放 HD 环境音属于 Crisp 激活用户专属功能");
               this.plugin.settings.ambientSound = "off";
               await this.plugin.saveSettings();
@@ -2607,16 +2689,12 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     const winObj = this.app.workspace.containerEl.ownerDocument.defaultView || window;
     this.mainWindow = winObj;
-    this.licenseManager = new CrispFocusLicenseManager(this.app, this.settings, {
-      verifier: this.licenseVerifier || verifyLicenseCode,
+    focusLicenseManagerFor(this, {
+      verifier: FOCUS_VERIFIER_OVERRIDES.get(this) || verifyLicenseCode,
       windowObj: winObj,
-      onEntitlementLost: () => {
-        if (this.audio) this.audio.stopAmbient();
-        this.updateTypewriterStyles();
-        if (this.cleanTypingActive) this.setCleanTypingEnabled(false);
-      },
+      onEntitlementLost: () => this.onEntitlementLost(),
     });
-    if (this.licenseVerifier) {
+    if (FOCUS_VERIFIER_OVERRIDES.has(this)) {
       await this.refreshLicense();
     } else {
       await this.licenseManager.initialize();
@@ -2625,12 +2703,12 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.app,
       () => this.settings.focusModeEnabled
         && this.settings.typewriterAudioEnabled
-        && this.licenseManager.isEntitled(),
+        && focusEntitled(this),
       () => this.settings.soundTheme || "typewriter",
       () => this.settings.typewriterVolume,
       () => this.settings.typewriterBellEnabled,
       () => this.settings.focusModeEnabled
-        && this.licenseManager.isEntitled()
+        && focusEntitled(this)
         && this.session?.getSnapshot().status !== "paused"
         ? (this.settings.ambientSound || "off")
         : "off",
@@ -2655,6 +2733,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       },
     });
     const restored = this.session.restore(this.settings.sessionState);
+    if (!focusEntitled(this) && restored.status === "running") await this.pauseFocusSession();
     if (restored.status === "idle" && this.settings.sessionState?.status !== "idle") {
       // The countdown ran out while Obsidian was closed; drop the stale state.
       // 关着 Obsidian 时跑完的番茄不算完成，这一轮循环也随之结束。
@@ -2766,7 +2845,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       id: "toggle-typewriter-audio",
       name: "切换打字音效 / Toggle sound effects",
       callback: async () => {
-        if (!this.settings.typewriterAudioEnabled && !this.licenseManager.isEntitled()) {
+        if (!this.settings.typewriterAudioEnabled && !focusEntitled(this)) {
           new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
           return;
         }
@@ -3000,6 +3079,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.settings.licenseCode = trimmed;
       await this.saveSettings();
       this.updateTypewriterStyles();
+      if (this.session) this.renderSessionStatus(this.session.getSnapshot());
       return result;
     }
     if (savedCode && savedCode !== trimmed) {
@@ -3013,8 +3093,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (!scene) {
       return { applied: false, reason: "未知的专注场景" };
     }
-    if (sceneRequiresLicense(scene) && !this.licenseManager.isEntitled()) {
-      return { applied: false, reason: "此场景包含音效，需要先激活 Crisp Focus" };
+    if (!focusEntitled(this)) {
+      return { applied: false, reason: "专注场景需要先激活 Crisp Focus" };
     }
 
     Object.assign(this.settings, scene.settings, { activeSceneId: sceneId });
@@ -3049,6 +3129,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
   renderSessionStatus(snapshot) {
     if (!this.statusBarEl) return;
+    // 未激活不显示状态栏入口
+    this.statusBarEl.classList.toggle("is-locked", !focusEntitled(this));
     const meta = this.settings.sessionMeta;
     const pomodoro = this.settings.pomodoroState?.active ? this.settings.pomodoroState : null;
     const isBreak = meta?.kind === "break";
@@ -3261,15 +3343,15 @@ class CrispFocusPlugin extends obsidian.Plugin {
       todayCount: today.count || 0,
       todayFocusMinutes: today.focusMinutes || 0,
       goal: Math.max(1, Math.min(24, Math.round(Number(this.settings.pomodoroDailyGoal) || 8))),
-      entitled: !!this.licenseManager?.isEntitled(),
+      entitled: focusEntitled(this),
       task: focusTaskContext(meta?.task || state?.task),
     };
   }
 
-  /** 番茄钟需要激活；单次专注会话仍然免费。options.task：整轮番茄都记在这个任务上。 */
+  /** 番茄钟和单次专注会话均需要激活。options.task：整轮番茄都记在这个任务上。 */
   async startPomodoro(options = {}) {
-    if (!this.licenseManager.isEntitled()) {
-      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能，可以先用单次专注会话");
+    if (!focusEntitled(this)) {
+      new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能，请先激活");
       return null;
     }
     const stopping = this.session.getSnapshot().status !== "idle" ? this.stopFocusSession() : null;
@@ -3283,7 +3365,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const state = this.settings.pomodoroState;
     if (!state?.active) return null;
     const kind = phase === "focus" ? "focus" : "break";
-    if (kind === "focus" && !this.licenseManager.isEntitled()) {
+    if (kind === "focus" && !focusEntitled(this)) {
       new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
       return null;
     }
@@ -3308,7 +3390,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   async startNextPomodoro() {
     const state = this.settings.pomodoroState;
     if (!state?.active || this.session.getSnapshot().status !== "idle") return null;
-    if (!this.licenseManager.isEntitled()) {
+    if (!focusEntitled(this)) {
       new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
       return null;
     }
@@ -3318,7 +3400,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   async skipPomodoroBreak() {
     const meta = this.settings.sessionMeta;
     if (meta?.kind !== "break" || this.session.getSnapshot().status === "idle") return null;
-    if (!this.licenseManager.isEntitled()) {
+    if (!focusEntitled(this)) {
       new obsidian.Notice("🔒 番茄钟属于 Crisp 激活用户专属功能");
       return null;
     }
@@ -3360,7 +3442,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       await this.saveSettings();
       return;
     }
-    if (this.settings.pomodoroAutoStartFocus && this.licenseManager.isEntitled()) {
+    if (this.settings.pomodoroAutoStartFocus && focusEntitled(this)) {
       new obsidian.Notice(`休息结束，开始第 ${state.round + 1} 个番茄`);
       await this.startPomodoroPhase("focus");
       return;
@@ -3373,6 +3455,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async startFocusSession(minutes = this.settings.sessionDurationMinutes, options = {}) {
+    if (!focusEntitled(this)) {
+      new obsidian.Notice("🔒 专注会话需要激活 Crisp Focus，请在设置中输入 Crisp 授权码。");
+      return null;
+    }
     const duration = Math.max(1, Math.min(240, Math.round(Number(minutes) || 25)));
     if (this.session.getSnapshot().status !== "idle") {
       // 正在计时又开始新的：前一段记为中断
@@ -3406,6 +3492,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async resumeFocusSession() {
+    if (!focusEntitled(this)) return null;
     const wasPaused = this.session.getSnapshot().status === "paused";
     const snapshot = this.session.resume();
     if (wasPaused && snapshot.status === "running") {
@@ -3491,7 +3578,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (!windowObj || this.windowBindings.has(windowObj)) return;
     const state = { isComposing: false, lastCharKeydownAt: 0, lastRepeatAt: 0 };
     const gestureHandler = () => {
-      if (!this.settings.focusModeEnabled) return;
+      if (!focusActive(this)) return;
       this.audio.handleUserGesture();
     };
     const compositionStartHandler = () => {
@@ -3504,7 +3591,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       // Cancellation is not a commit; restrict feedback to actual input hosts.
       if (evt.data === "" || !this.isAudioHostTarget(windowObj.document.activeElement)) return;
       state.lastCharKeydownAt = Date.now();
-      if (this.settings.focusModeEnabled && this.settings.typewriterAudioEnabled) {
+      if (focusActive(this) && this.settings.typewriterAudioEnabled) {
         this.audio.playSpaceKey();
       }
       if (isTypewriterActive(this)) {
@@ -3524,7 +3611,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (this.typewriterEngine) {
         this.typewriterEngine.onUserActivity();
       }
-      if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
+      if (!focusActive(this) || !this.settings.typewriterAudioEnabled) return;
       if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
 
       const activeEl = windowObj.document.activeElement;
@@ -3567,7 +3654,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       if (this.typewriterEngine) {
         this.typewriterEngine.onUserActivity();
       }
-      if (!this.settings.focusModeEnabled || !this.settings.typewriterAudioEnabled) return;
+      if (!focusActive(this) || !this.settings.typewriterAudioEnabled) return;
       // iOS 屏幕键盘：英文走 insertText，中文走组合输入 insertCompositionText。
       if (evt.inputType !== "insertText" && evt.inputType !== "insertCompositionText") return;
       if (Date.now() - state.lastCharKeydownAt < 80) return;
@@ -3625,7 +3712,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
       new obsidian.Notice("清爽打字目前只支持桌面端");
       return false;
     }
-    if (enabled && !this.licenseManager?.isEntitled()) {
+    if (enabled && !focusEntitled(this)) {
       new obsidian.Notice("🔒 清爽打字属于 Crisp 激活用户专属功能");
       return false;
     }
@@ -3680,7 +3767,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   async setTypewriterScrollEnabled(enabled) {
-    if (enabled && !this.licenseManager.isEntitled()) {
+    if (enabled && !focusEntitled(this)) {
       new obsidian.Notice("🔒 打字机定焦属于 Crisp 激活用户专属功能");
       return false;
     }
@@ -3748,7 +3835,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     windowObjects.forEach((windowObj) => {
       if (!windowObj || !windowObj.document) return;
       windowObj.document.querySelectorAll(".cm-editor").forEach((editor) => {
-        applyTypewriterStylesToEditor(editor, this.settings, this.licenseManager?.isEntitled?.());
+        applyTypewriterStylesToEditor(editor, this.settings, focusEntitled(this));
       });
     });
   }
@@ -3772,7 +3859,21 @@ class CrispFocusPlugin extends obsidian.Plugin {
     });
   }
 
+  // 授权失效：停掉声音和打字机效果，退出纯净写作，状态栏随之隐藏。
+  onEntitlementLost() {
+    this.clearCursorStyles();
+    if (this.session?.getSnapshot().status === "running") void this.pauseFocusSession();
+    if (this.audio) this.audio.stopAmbient();
+    this.updateTypewriterStyles();
+    if (this.cleanTypingActive) this.setCleanTypingEnabled(false);
+    if (this.session) this.renderSessionStatus(this.session.getSnapshot());
+  }
+
   async setFocusModeEnabled(enabled) {
+    if (enabled && !focusEntitled(this)) {
+      new obsidian.Notice("🔒 Crisp Focus 需要激活后使用，请在设置中输入 Crisp 授权码。");
+      return;
+    }
     this.settings.focusModeEnabled = enabled;
     await this.saveSettings();
     // 写盘期间别的动作可能改了开关：按最新值收尾，旧动作不覆盖新动作

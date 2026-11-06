@@ -1,8 +1,10 @@
 {
   "name": "crisp-focus",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "private": true,
   "scripts": {
+    "test:e2e:license-hardening": "node tests/license-hardening.e2e.cjs",
+    "test:e2e:license-gates": "node tests/license-gates.e2e.cjs",
     "check": "node --check main.js && npm test",
     "deploy": "node scripts/deploy.mjs",
     "test": "node --test tests/regression.test.js && node --test tests/license-http.cjs"

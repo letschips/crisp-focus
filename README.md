@@ -24,9 +24,7 @@ ambient soundscapes to Obsidian.
 
 Choose a scene from the settings page or the command palette. A scene applies
 its cursor, typewriter scrolling, typing feedback, and ambient sound choices as one atomic preset.
-`Silent writing` is available without activation; its typewriter scrolling
-turns on once the license is verified. Scenes that contain paid
-audio stay locked until the current license is verified. Changing an
+All scenes require a verified Crisp license. Changing an
 individual scene-controlled setting marks the setup as `Custom`.
 
 ## Clean typing
@@ -57,7 +55,7 @@ panel. A pomodoro alternates focus and break phases: 25-minute focus and
 Breaks turn Focus effects and ambient sound off; the next focus phase turns them
 back on. By default the next focus waits for you after a break. A soft two-note
 chime marks the end of each phase. The pomodoro timer requires a valid Crisp
-license; single focus sessions stay free.
+license, including single focus sessions.
 
 Other plugins can follow sessions through the `crisp-focus:session` workspace
 event (`apiVersion` 2). Each event carries the session id, `kind` (`focus` or
@@ -81,9 +79,9 @@ by session `id`. Breaks are not logged.
 
 ## License verification and privacy
 
-The animated cursor and single focus sessions are available without
-activation. Typewriter scrolling, clean typing, the pomodoro timer, typing
-feedback and ambient soundscapes require a valid Crisp license. Without one,
+Focus mode, the animated cursor, all scenes, single focus sessions, typewriter
+scrolling, clean typing, the pomodoro timer, typing feedback and ambient
+soundscapes require a valid Crisp license. Without one,
 saved typewriter choices are kept but have no effect until activation. A
 license with an expiry date stops unlocking these features at that moment,
 even while Obsidian stays open. License signatures are
@@ -91,7 +89,7 @@ validated locally first. The plugin then sends the license code, the current
 Obsidian app/device identifier, and the plugin ID to the Crisp license service
 to register or verify the device. If the service is unreachable, a license
 with a valid local signature keeps working offline; an explicit rejection from
-the service (revoked, device limit reached) disables paid audio.
+the service (revoked, device limit reached) disables these features and pauses an active session.
 
 The license code is stored only in the current vault's plugin `data.json`.
 Keep that file private and exclude it from shared archives.

@@ -34,7 +34,7 @@ function loadVerifier(scenario) {
   class EmptyBase {}
   const context = {
     module, exports: module.exports, atob, btoa, TextEncoder, TextDecoder, Buffer,
-    crypto: webcrypto, console: { debug() {}, log() {}, warn() {}, error() {} },
+    crypto: scenario.crypto ?? webcrypto, console: { debug() {}, log() {}, warn() {}, error() {} },
     setTimeout(fn, ms) {
       const timer = setTimeout(fn, ms === 2500 ? 10 : ms);
       timers.add(timer);
@@ -160,3 +160,24 @@ test('a stale online approval cannot overwrite a newer failed verification', asy
     assert.equal(manager.isEntitled(), false);
   } finally { harness.cleanup(); }
 });
+
+// Focus 1.10.0+ captures WebCrypto at load and refuses a verifier that accepts anything.
+if (pluginId === 'crisp-focus') {
+  test('replacing crypto.subtle.verify after load cannot pass a forged code', async () => {
+    const subtle = { importKey: webcrypto.subtle.importKey.bind(webcrypto.subtle), verify: webcrypto.subtle.verify.bind(webcrypto.subtle) };
+    const verifier = loadVerifier({ network: true, crypto: { subtle, getRandomValues: a => webcrypto.getRandomValues(a) } });
+    try {
+      subtle.verify = async () => true;
+      const forged = `${makeCode().split('.')[0]}.${Buffer.alloc(64, 7).toString('base64url')}`;
+      assert.equal((await verifier.verify(forged)).valid, false);
+      assert.equal((await verifier.verify(makeCode())).valid, true, 'a genuine code still works');
+    } finally { verifier.cleanup(); }
+  });
+  test('a verifier that accepts everything at load disables activation', async () => {
+    const subtle = { importKey: webcrypto.subtle.importKey.bind(webcrypto.subtle), verify: async () => true };
+    const verifier = loadVerifier({ network: true, crypto: { subtle, getRandomValues: a => webcrypto.getRandomValues(a) } });
+    try {
+      assert.equal((await verifier.verify(makeCode())).valid, false);
+    } finally { verifier.cleanup(); }
+  });
+}
