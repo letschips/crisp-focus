@@ -3329,6 +3329,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       status: snap.status,
       remainingMs,
       plannedMs: meta ? meta.plannedMinutes * 60000 : 0,
+      // 这一段开始的时刻（暂停不改它）：Pulse 用它把专注画到真正的时间位置
+      startedAt: meta?.startedAt || null,
       kind: meta?.kind || null,
       phase: meta?.phase || null,
       pomodoro: !!meta?.pomodoro || !!state?.active,

@@ -3125,3 +3125,19 @@ test("the session log survives a reload, drops damaged entries and keeps the new
     assert.deepEqual([seqs[0], seqs.at(-1)], [2, 301]);
   } finally { full.plugin.onunload(); }
 });
+
+// Pulse 1.45.1 起用快照里的开始时刻把正在进行的专注画到真正的时间位置；暂停、继续都不能改它。
+test("the pomodoro snapshot carries the session start, unchanged by pause and resume", async () => {
+  const { plugin } = await pomodoroPlugin();
+  assert.equal(plugin.getPomodoroSnapshot().startedAt, null, "没在专注时没有开始时刻");
+  await plugin.startFocusSession(undefined, {});
+  const started = plugin.getPomodoroSnapshot().startedAt;
+  assert.ok(Number.isFinite(started) && started > 0);
+  assert.equal(started, plugin.settings.sessionMeta.startedAt);
+  await plugin.pauseFocusSession();
+  assert.equal(plugin.getPomodoroSnapshot().status, "paused");
+  assert.equal(plugin.getPomodoroSnapshot().startedAt, started, "暂停不改开始时刻");
+  await plugin.resumeFocusSession();
+  assert.equal(plugin.getPomodoroSnapshot().startedAt, started, "继续也不改");
+  plugin.onunload();
+});
