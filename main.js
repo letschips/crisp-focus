@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.9.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.10.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -92,8 +92,19 @@ async function importEd25519PublicKey(pem) {
   );
 }
 
+/**
+ * Chat apps mangle long codes when they are copied: line breaks, spaces (incl. full-width/NBSP),
+ * zero-width characters, and surrounding text such as "卡密：…。". Returns the bare code.
+ */
+function normalizeLicenseCode(input) {
+  if (typeof input !== "string") return "";
+  const compact = input.replace(/[\s\u200B-\u200D\u2060\uFEFF]/g, "");
+  const match = compact.match(/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/);
+  return match ? match[0] : compact;
+}
+
 async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", app = null, windowObj = window, options = {}) {
-  const trimmed = (licenseCode || "").trim();
+  const trimmed = normalizeLicenseCode(licenseCode);
   if (!trimmed) return { valid: false, reason: "授权码为空" };
   const parts = trimmed.split(".");
   if (parts.length !== 2) return { valid: false, reason: "授权码格式无效" };
@@ -342,6 +353,90 @@ class CrispFocusLicenseManager {
     this.scheduleExpiry();
     return result;
   }
+}
+
+// Every paid Crisp plugin; a module constant so nothing on a plugin instance can widen the scan.
+const FOCUS_SIBLING_PLUGIN_IDS = [
+  "crisp-annotations", "crisp-asr", "crisp-base", "crisp-file-explorer", "crisp-focus", "crisp-mind",
+  "crisp-pets", "crisp-pulse", "crisp-reading-rail", "crisp-recall", "crisp-ripple", "crisp-search",
+  "crisp-tempo", "crisp-visual",
+];
+const FOCUS_INHERIT_STARTED = new WeakSet();
+const FOCUS_UNLOADED = new WeakSet();
+
+/** Codes saved by sibling Crisp plugins in this vault that pass the local signature check (read-only scan). */
+async function discoverVaultCrispLicenses(app, targetPluginId, limit, verifyLocal, windowObj) {
+  if (!app) return [];
+  const candidates = [];
+  const seen = new Set();
+  const add = (code) => {
+    const clean = normalizeLicenseCode(code);
+    if (!clean.includes(".") || seen.has(clean)) return;
+    seen.add(clean);
+    candidates.push(clean);
+  };
+  for (const pid of FOCUS_SIBLING_PLUGIN_IDS) {
+    if (pid === targetPluginId) continue;
+    const p = app.plugins?.plugins?.[pid];
+    add(p?.settings?.licenseCode);
+    add(p?.settings?.licenseKey);
+    add(p?.data?.licenseCode);
+    add(p?.data?.licenseKey);
+  }
+  try {
+    const adapter = app.vault?.adapter;
+    if (adapter && typeof adapter.list === "function") {
+      const pluginsDir = `${app.vault?.configDir || ".obsidian"}/plugins`;
+      if (await adapter.exists(pluginsDir)) {
+        const listing = await adapter.list(pluginsDir);
+        for (const folder of listing.folders || []) {
+          const name = folder.split("/").pop() || "";
+          if (!name.startsWith("crisp-") || name === targetPluginId) continue;
+          const dataPath = `${folder}/data.json`;
+          if (!(await adapter.exists(dataPath))) continue;
+          try {
+            const data = JSON.parse(await adapter.read(dataPath));
+            add(data?.licenseCode || data?.licenseKey || data?.license);
+          } catch (e) {
+            // a damaged data.json of another plugin is skipped
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.debug("Crisp Focus license scan error:", error);
+  }
+  const valid = [];
+  for (const code of candidates) {
+    if (valid.length >= limit) break;
+    const local = await verifyLocal(code, targetPluginId, app, windowObj, { skipOnline: true });
+    if (local?.valid === true) valid.push(code);
+  }
+  return valid;
+}
+
+/**
+ * Startup, once: when this plugin is not entitled, offer each sibling code to the normal
+ * activateLicense path (online verification, entitlement gate, save). The first that passes wins.
+ * Nothing here grants access by itself.
+ */
+async function inheritFocusSiblingLicense(plugin) {
+  if (!plugin || FOCUS_INHERIT_STARTED.has(plugin)) return null;
+  FOCUS_INHERIT_STARTED.add(plugin);
+  const manager = FOCUS_LICENSE_OWNER.get(plugin);
+  try { await manager?.backgroundVerification; } catch (e) { /* the check itself reports its failure */ }
+  if (FOCUS_UNLOADED.has(plugin) || focusEntitled(plugin)) return null;
+  const verifyLocal = FOCUS_VERIFIER_OVERRIDES.get(plugin) || verifyLicenseCode;
+  const candidates = await discoverVaultCrispLicenses(plugin.app, "crisp-focus", 5, verifyLocal, plugin.mainWindow);
+  const own = normalizeLicenseCode(plugin.settings?.licenseCode);
+  for (const candidate of candidates) {
+    if (FOCUS_UNLOADED.has(plugin) || focusEntitled(plugin)) return null;
+    if (candidate === own) continue;
+    const result = await plugin.activateLicense(candidate);
+    if (result.stale) return null;
+    if (result.valid) return candidate;
+  }
+  return null;
 }
 
 // Inline monkey-around helper
@@ -2755,6 +2850,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     // 插件启用或重载前已经开着的弹出窗口不会再触发 window-open
     this.attachExistingWindows();
     this.app.workspace.onLayoutReady?.(() => this.attachExistingWindows());
+    this.app.workspace.onLayoutReady?.(() => {
+      this.inheritSiblingLicense().catch((error) => console.debug("Crisp Focus license inheritance failed", error));
+    });
     this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, windowObj) => {
       this.attachWindow(windowObj);
     }));
@@ -2937,6 +3035,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
   }
 
   onunload() {
+    FOCUS_UNLOADED.add(this);
     if (this.cleanTypingActive) this.setCleanTypingEnabled(false);
     if (this.cursorPatchTimer !== null && this.cursorPatchTimer !== undefined) {
       this.mainWindow.clearTimeout(this.cursorPatchTimer);
@@ -3069,8 +3168,13 @@ class CrispFocusPlugin extends obsidian.Plugin {
     return result;
   }
 
+  // Entry point only: the work and every gate decision stay in module functions.
+  inheritSiblingLicense() {
+    return inheritFocusSiblingLicense(this);
+  }
+
   async activateLicense(code) {
-    const trimmed = (code || "").trim();
+    const trimmed = normalizeLicenseCode(code);
     const savedCode = this.settings.licenseCode;
     const result = await this.licenseManager.verify(trimmed);
     // 已被更新的请求取代：结果作废，也不能回滚到旧授权码

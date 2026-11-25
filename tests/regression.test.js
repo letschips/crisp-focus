@@ -3141,3 +3141,107 @@ test("the pomodoro snapshot carries the session start, unchanged by pause and re
   assert.equal(plugin.getPomodoroSnapshot().startedAt, started, "继续也不改");
   plugin.onunload();
 });
+
+/* 授权继承（1.10.0）。失败模式：
+   - 自己的码仍有效时去扫兄弟插件，或覆盖了已存的码。
+   - 兄弟码被在线拒绝后仍被保存或激活。
+   - 兄弟码本地验签不过却发出在线请求。 */
+async function inheritPlugin({ saved = {}, siblings = {}, verifier }) {
+  const { CrispFocusPlugin, focusEntitled } = loadPluginInternals();
+  const { windowObject } = createWindow();
+  const plugin = new CrispFocusPlugin();
+  const calls = { local: [], online: [], list: 0 };
+  plugin.__focusTest.overrideVerifier(async (code, id, app, win, options) => {
+    (options?.skipOnline ? calls.local : calls.online).push(code);
+    return verifier(code, options);
+  });
+  plugin.app = createPluginApp(windowObject);
+  const files = new Map();
+  const folders = [];
+  for (const [id, data] of Object.entries(siblings)) {
+    folders.push(`.obsidian/plugins/${id}`);
+    files.set(`.obsidian/plugins/${id}/data.json`, JSON.stringify(data));
+  }
+  Object.assign(plugin.app.vault.adapter, {
+    exists: async (p) => p === ".obsidian/plugins" || files.has(p),
+    list: async () => { calls.list += 1; return { folders, files: [] }; },
+    read: async (p) => files.get(p),
+  });
+  const written = [];
+  plugin.loadData = async () => ({ ...saved });
+  plugin.saveData = async (data) => { written.push(data.licenseCode); };
+  await plugin.onload();
+  return { plugin, calls, written, entitled: () => focusEntitled(plugin) };
+}
+
+const OK = { valid: true, source: "online", payload: { product: "Crisp Suite", features: ["all"], userName: "T" } };
+const CODE_A = "aaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbb";
+const CODE_B = "cccccccccccccccccccc.dddddddddddddddddddd";
+
+test("inherit: no own code and a valid sibling code activates through the normal path and saves it clean", async () => {
+  const { plugin, written, entitled } = await inheritPlugin({
+    siblings: { "crisp-mind": { licenseCode: `卡密：${CODE_A}\n` } },
+    verifier: (code) => (code === CODE_A ? OK : { valid: false, reason: "授权码为空" }),
+  });
+  try {
+    assert.equal(entitled(), false);
+    await plugin.inheritSiblingLicense();
+    assert.equal(entitled(), true);
+    assert.equal(plugin.settings.licenseCode, CODE_A);
+    assert.equal(written.at(-1), CODE_A);
+  } finally { plugin.onunload(); }
+});
+
+test("inherit: a still-valid own code is not scanned and not replaced", async () => {
+  const { plugin, calls, written } = await inheritPlugin({
+    saved: { licenseCode: CODE_A },
+    siblings: { "crisp-mind": { licenseCode: CODE_B } },
+    verifier: () => OK,
+  });
+  try {
+    await plugin.inheritSiblingLicense();
+    assert.equal(calls.list, 0);
+    assert.equal(plugin.settings.licenseCode, CODE_A);
+    assert.equal(written.includes(CODE_B), false);
+  } finally { plugin.onunload(); }
+});
+
+test("inherit: a sibling code the server rejects is neither saved nor activated", async () => {
+  const { plugin, written, entitled } = await inheritPlugin({
+    siblings: { "crisp-mind": { licenseCode: CODE_B } },
+    verifier: (code, options) => (options?.skipOnline ? OK : { valid: false, reason: "设备数已达上限" }),
+  });
+  try {
+    await plugin.inheritSiblingLicense();
+    assert.equal(entitled(), false);
+    assert.equal(plugin.settings.licenseCode, "");
+    assert.equal(written.includes(CODE_B), false);
+  } finally { plugin.onunload(); }
+});
+
+test("inherit: a sibling code that fails the local signature check never goes online", async () => {
+  const { plugin, calls, entitled } = await inheritPlugin({
+    siblings: { "crisp-mind": { licenseCode: CODE_B } },
+    verifier: () => ({ valid: false, reason: "授权签名无效" }),
+  });
+  try {
+    const before = calls.online.length;
+    await plugin.inheritSiblingLicense();
+    assert.equal(calls.online.length, before);
+    assert.equal(entitled(), false);
+    assert.equal(plugin.settings.licenseCode, "");
+  } finally { plugin.onunload(); }
+});
+
+test("inherit: the scan runs once per load", async () => {
+  const { plugin, calls, entitled } = await inheritPlugin({
+    siblings: { "crisp-mind": { licenseCode: CODE_B } },
+    verifier: () => ({ valid: false, reason: "x" }),
+  });
+  try {
+    await plugin.inheritSiblingLicense();
+    await plugin.inheritSiblingLicense();
+    assert.equal(calls.list, 1);
+    assert.equal(entitled(), false);
+  } finally { plugin.onunload(); }
+});
