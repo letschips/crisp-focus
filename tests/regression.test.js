@@ -3358,7 +3358,18 @@ function inkHarness({ entitled = true } = {}) {
       state: { selection: { main: { head: from + text.length } }, doc: { sliceString: (a, b) => doc.slice(a, b) } },
     });
   };
-  return { inst, view, send };
+  // 只移动光标、不改文档（比如鼠标点回正文）
+  const select = (head, events = ["select.pointer"]) => {
+    inst.update({
+      docChanged: false,
+      selectionSet: true,
+      changes: { mapPos: (p) => p },
+      transactions: [{ docChanged: false, isUserEvent: (name) => events.some((e) => e === name || e.startsWith(`${name}.`)) }],
+      view,
+      state: { selection: { main: { head } }, doc: { sliceString: (a, b) => doc.slice(a, b) } },
+    });
+  };
+  return { inst, view, send, select };
 }
 
 test("1.11.1 ink marks follow code points and count an IME commit once", () => {
@@ -3383,4 +3394,18 @@ test("1.11.1 ink marks follow code points and count an IME commit once", () => {
   const locked = inkHarness({ entitled: false });
   locked.send(["input.type"], 0, "ab");
   assert.equal(locked.inst.decorations.size, 0, "unactivated leaves nothing behind");
+});
+
+/* 1.11.2 复核。失败模式：拼音组字到一半切走焦点（点侧栏、⌘P），之后只用鼠标点回正文，
+   原本就在的字被当成刚上屏的字，变透明、闪乱码、发粒子。 */
+test("1.11.2 losing focus mid-composition does not replay old text on the next click", () => {
+  const h = inkHarness();
+  h.view.composing = true;
+  h.send(["input.type.compose"], 0, "ni");
+  h.view.composing = false;
+  h.view.hasFocus = false;
+  h.send(["input.type.compose"], 0, "你好", 2);
+  h.view.hasFocus = true;
+  h.select(2);
+  assert.equal(h.inst.decorations.size, 0, "a pointer click back into the text fires nothing");
 });

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.1)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.2)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1736,8 +1736,12 @@ function createInkWaveExtension(plugin) {
         this.decorations = Decoration.none;
         return;
       }
-      // 没有焦点的编辑器收到的改动不是在这里打的字（比如表格单元格同步回主编辑器）：不发射
-      if (!update.view.hasFocus) return;
+      // 没有焦点的编辑器收到的改动不是在这里打的字（比如表格单元格同步回主编辑器）：不发射。
+      // 失焦也结束了这里的组字，清掉起点，免得之后点回正文时把旧字当成刚上屏的字
+      if (!update.view.hasFocus) {
+        this.composeFrom = null;
+        return;
+      }
 
       if (this.composeFrom !== null && update.docChanged) {
         this.composeFrom = update.changes.mapPos(this.composeFrom, -1);
@@ -1775,6 +1779,9 @@ function createInkWaveExtension(plugin) {
       }
 
       // 输入法上屏：组字区间 [composeFrom, 光标] 就是这次上屏的字
+      // 鼠标点选不会是上屏：只在真正的输入或收尾空事务里结算
+      const pointerOnly = !update.docChanged && update.transactions.some((tr) => tr.isUserEvent("select"));
+      if (pointerOnly) this.composeFrom = null;
       if (this.composeFrom !== null && !update.view.composing) {
         const head = update.state.selection.main.head;
         const from = Math.max(0, Math.min(this.composeFrom, head));
@@ -2834,8 +2841,16 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     const active = this.containerEl.ownerDocument?.activeElement;
     const editing = active && this.containerEl.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName);
     if (reason === "tick" || editing) {
-      // 正在填授权码或数字时不重建整页，只更新剩余时间；失焦后下一次变化再重画
+      // 正在填授权码或数字时不重建整页，只更新剩余时间
       this.sessionControlSetting.setDesc(snapshot.status === "idle" ? "" : `剩余 ${formatSessionRemaining(snapshot.remainingMs)}`);
+      if (editing && reason !== "tick" && !this.pendingRedraw) {
+        // 会话状态变了但没重画：离开输入框时补画一次（比如会话恰好结束，之后不再有事件）
+        this.pendingRedraw = true;
+        active.addEventListener("focusout", () => {
+          this.pendingRedraw = false;
+          if (this.containerEl?.isConnected) this.display();
+        }, { once: true });
+      }
     } else {
       this.display();
     }
@@ -2843,6 +2858,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
   display() {
     const { containerEl } = this;
+    this.pendingRedraw = false;
     containerEl.empty();
 
     const brandHeader = containerEl.createDiv({ cls: "crisp-brand-header" });
