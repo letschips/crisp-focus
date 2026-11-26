@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.10.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -1598,6 +1598,709 @@ function createTypewriterExtension(plugin) {
 }
 
 // --------------------------------------------------------------------------
+// 3b. Ink Wave — 落字特效：光标行旁的字符波，新字从波里飞出来落进正文
+// 独立功能，任何编辑模式可用；需要激活、受专注模式总开关控制。默认关闭，
+// 减少动态效果、手机端、Canvas 卡片里都不画。
+// 画布只覆盖光标附近一条带，不用 transform / will-change，避免半透明窗口留旧帧。
+// --------------------------------------------------------------------------
+const INK_WAVE = Object.freeze({
+  bandHeight: 196,
+  bandBottomPad: 12,
+  waveGap: 10,
+  waveMax: 50,
+  rowHeight: 8,
+  fontSize: 8,
+  sigma: 32,
+  peakSigma: 52,
+  edgeFade: 56,
+  maxBumps: 32,
+  maxParticles: 260,
+  maxSparks: 160,
+  maxBatchChars: 14,
+  maxPasteChars: 40,
+  idleMs: 1600,
+  landBaseDelay: 340,
+  landStagger: 26,
+});
+const INK_GLYPHS_HEAVY = "#$%&@8BWM";
+const INK_GLYPHS_MID = "*+=xoXO0a";
+const INK_GLYPHS_LIGHT = ".:-~'^`,";
+const INK_SCRAMBLE_LATIN = "!<>-_\\/[]{}=+*^?#%&0123456789ABCDEFXZ";
+const INK_SCRAMBLE_CJK = "丨丿丶乙十口日月木水火土人大己巳ノ二三工山";
+const INK_CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/;
+const INK_BLOOM_RE = /[。！？.!?…]/;
+const INK_EXCLUDED_HOSTS = ".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal";
+
+function isInkWaveActive(plugin, view) {
+  if (!plugin?.settings?.focusModeEnabled || !focusEntitled(plugin)) return false;
+  if (!plugin.settings.typewriterInkWaveEnabled) return false;
+  if (obsidian.Platform?.isMobile) return false;
+  const dom = view?.dom;
+  if (!dom || typeof dom.closest !== "function" || dom.closest(INK_EXCLUDED_HOSTS)) return false;
+  const win = dom.ownerDocument?.defaultView;
+  try {
+    if (win?.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+  } catch (e) {
+    // Keep drawing when the host cannot evaluate media queries.
+  }
+  return true;
+}
+
+function inkHash(a, b, c) {
+  let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function createInkWaveExtension(plugin) {
+  let cmView = null;
+  try {
+    cmView = require("@codemirror/view");
+  } catch (e) {
+    return null;
+  }
+  if (!cmView || typeof cmView.ViewPlugin?.fromClass !== "function" || !cmView.Decoration) {
+    return null;
+  }
+  const { Decoration } = cmView;
+
+  class CrispInkWaveViewPlugin {
+    constructor(view) {
+      this.view = view;
+      this.decorations = Decoration.none;
+      this.landings = [];
+      this.bumps = [];
+      this.particles = [];
+      this.sparks = [];
+      this.scrambles = [];
+      this.peak = { x: null, v: 0, amp: 0 };
+      this.heat = 0;
+      this.alpha = 0;
+      // flip：光标下方放不下时把波翻到光标行上方；dim：波会压到相邻正文时变淡
+      this.flip = false;
+      this.crowded = false;
+      this.dim = 1;
+      this.lastInputAt = 0;
+      this.anchor = null;
+      this.bandTop = null;
+      this.geom = null;
+      this.canvas = null;
+      this.ctx = null;
+      this.rafId = null;
+      this.lastFrameAt = 0;
+      this.composeFrom = null;
+      this.composeTimer = null;
+      this.onCompositionEnd = () => {
+        const win = this.win();
+        if (this.composeTimer) win.clearTimeout(this.composeTimer);
+        // CodeMirror 收尾输入法后不一定再派发更新；补一个空事务，让上屏的字在 update 里结算
+        this.composeTimer = win.setTimeout(() => {
+          this.composeTimer = null;
+          if (this.composeFrom !== null && !this.view.composing && this.view.dom.isConnected) {
+            this.view.dispatch({});
+          }
+        }, 30);
+      };
+      view.contentDOM?.addEventListener("compositionend", this.onCompositionEnd);
+    }
+
+    win() {
+      return this.view?.dom?.ownerDocument?.defaultView || plugin.mainWindow || window;
+    }
+
+    update(update) {
+      const now = Date.now();
+      let rebuild = false;
+      if (this.landings.length) {
+        let next = this.landings.filter((l) => l.expiresAt > now);
+        if (update.docChanged) {
+          next = next
+            .map((l) => ({ ...l, from: update.changes.mapPos(l.from, 1), to: update.changes.mapPos(l.to, -1) }))
+            .filter((l) => l.to > l.from);
+        }
+        rebuild = next.length !== this.landings.length || update.docChanged;
+        this.landings = next;
+      }
+
+      const active = isInkWaveActive(plugin, update.view);
+      if (!active) {
+        this.composeFrom = null;
+        if (this.landings.length) {
+          this.landings = [];
+          rebuild = true;
+        }
+        if (rebuild) this.rebuildDecorations();
+        return;
+      }
+
+      if (this.composeFrom !== null && update.docChanged) {
+        this.composeFrom = update.changes.mapPos(this.composeFrom, -1);
+      }
+
+      const inserts = [];
+      let deleted = 0;
+      let pulse = 0;
+      if (update.docChanged) {
+        const trs = update.transactions;
+        trs.forEach((tr, index) => {
+          if (!tr.docChanged) return;
+          const composing = tr.isUserEvent("input.type.compose") || update.view.composing;
+          const typed = tr.isUserEvent("input");
+          const removed = tr.isUserEvent("delete");
+          if (!typed && !removed && !composing) return;
+          const mapLater = (pos, assoc) => {
+            let p = pos;
+            for (let i = index + 1; i < trs.length; i++) p = trs[i].changes.mapPos(p, assoc);
+            return p;
+          };
+          tr.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+            if (toA > fromA) deleted += toA - fromA;
+            if (composing) {
+              const start = mapLater(fromB, -1);
+              this.composeFrom = this.composeFrom === null ? start : Math.min(this.composeFrom, start);
+              pulse += 1;
+              return;
+            }
+            if (!typed || toB <= fromB) return;
+            if (tr.isUserEvent("input.paste") && toB - fromB > INK_WAVE.maxPasteChars) return;
+            inserts.push({ from: mapLater(fromB, -1), text: inserted.toString() });
+          });
+        });
+      }
+
+      // 输入法上屏：组字区间 [composeFrom, 光标] 就是这次上屏的字
+      if (this.composeFrom !== null && !update.view.composing && !plugin.isComposing) {
+        const head = update.state.selection.main.head;
+        const from = Math.max(0, Math.min(this.composeFrom, head));
+        if (head > from && head - from <= INK_WAVE.maxPasteChars) {
+          inserts.push({ from, text: update.state.doc.sliceString(from, head) });
+        }
+        this.composeFrom = null;
+      }
+
+      const chars = [];
+      let newlines = 0;
+      inserts.forEach((ins) => {
+        for (let i = 0; i < ins.text.length; i++) {
+          const ch = ins.text[i];
+          if (ch === "\n") {
+            newlines += 1;
+            continue;
+          }
+          if (ch === "\r") continue;
+          chars.push({ pos: ins.from + i, ch });
+        }
+      });
+      const batch = chars.slice(-INK_WAVE.maxBatchChars);
+      batch.forEach((c, i) => {
+        c.delay = INK_WAVE.landBaseDelay + i * INK_WAVE.landStagger;
+        if (/\s/.test(c.ch)) return;
+        this.landings.push({ from: c.pos, to: c.pos + 1, delay: c.delay, expiresAt: now + c.delay + 520 });
+        rebuild = true;
+      });
+      if (rebuild) this.rebuildDecorations();
+
+      if (!batch.length && !deleted && !pulse && !newlines && !update.selectionSet) return;
+      if (batch.length || deleted || pulse || newlines) {
+        this.lastInputAt = now;
+        this.heat = Math.min(1, this.heat + 0.08 * Math.max(1, batch.length) + (pulse ? 0.04 : 0));
+      }
+      const prevAnchor = this.anchor;
+      update.view.requestMeasure({
+        read: (view) => this.measure(view, batch),
+        write: (m) => this.apply(m, { inserted: batch.length, deleted, pulse, newlines, prevAnchor }),
+      });
+    }
+
+    rebuildDecorations() {
+      if (!this.landings.length) {
+        this.decorations = Decoration.none;
+        return;
+      }
+      const now = Date.now();
+      const ranges = this.landings.map((l) => {
+        const elapsed = now - (l.expiresAt - l.delay - 520);
+        return Decoration.mark({
+          class: "crisp-focus-ink-land",
+          attributes: { style: `animation-delay:${Math.round(l.delay - elapsed)}ms` },
+        }).range(l.from, l.to);
+      });
+      this.decorations = Decoration.set(ranges, true);
+    }
+
+    measure(view, batch) {
+      const domRect = view.dom.getBoundingClientRect();
+      const scrollRect = view.scrollDOM.getBoundingClientRect();
+      const scrollTop = view.scrollDOM.scrollTop || 0;
+      const toContentY = (clientY) => clientY - scrollRect.top + scrollTop;
+      const head = view.coordsAtPos(view.state.selection.main.head);
+      let geom = this.geom;
+      if (!geom || Math.abs(geom.width - domRect.width) > 0.5) {
+        const win = this.win();
+        const contentStyle = win.getComputedStyle(view.contentDOM);
+        const line = view.contentDOM.querySelector(".cm-line");
+        const lineRect = line ? line.getBoundingClientRect() : view.contentDOM.getBoundingClientRect();
+        const lineStyle = line ? win.getComputedStyle(line) : contentStyle;
+        const padL = parseFloat(lineStyle.paddingLeft) || 0;
+        const padR = parseFloat(lineStyle.paddingRight) || 0;
+        const mono = (win.getComputedStyle(view.dom.ownerDocument.body).getPropertyValue("--font-monospace") || "").trim();
+        geom = {
+          width: domRect.width,
+          contentLeft: lineRect.left - domRect.left + padL,
+          contentRight: lineRect.right - domRect.left - padR,
+          color: contentStyle.color || "#888",
+          font: `${INK_WAVE.fontSize}px ${mono || "ui-monospace, SFMono-Regular, Menlo, monospace"}`,
+          textFamily: contentStyle.fontFamily || "sans-serif",
+        };
+      }
+      geom.offsetTop = scrollRect.top - domRect.top;
+      const targets = [];
+      batch.forEach((c) => {
+        if (/\s/.test(c.ch)) return;
+        const a = view.coordsAtPos(c.pos, 1);
+        if (!a) return;
+        const b = view.coordsAtPos(c.pos + 1, -1);
+        const sameLine = b && Math.abs(b.top - a.top) < 2 && b.left > a.left;
+        const x = sameLine ? (a.left + b.left) / 2 : a.left + 4;
+        targets.push({
+          x: x - domRect.left,
+          y: toContentY((a.top + a.bottom) / 2),
+          size: Math.max(8, a.bottom - a.top),
+          width: sameLine ? b.left - a.left : 8,
+          ch: c.ch,
+          delay: c.delay,
+        });
+      });
+      // 波能覆盖到的像素范围内有正文，就算挤：隔着空行也算
+      const doc = view.state.doc;
+      const headPos = view.state.selection.main.head;
+      const line = doc.lineAt(headPos);
+      const reach = INK_WAVE.waveGap + INK_WAVE.waveMax;
+      const headBlock = view.lineBlockAt(headPos);
+      let textBelow = false;
+      for (let n = line.number + 1; n <= Math.min(doc.lines, line.number + 8); n++) {
+        const l = doc.line(n);
+        if (view.lineBlockAt(l.from).top - headBlock.bottom > reach) break;
+        if (l.text.trim()) { textBelow = true; break; }
+      }
+      let textAbove = false;
+      for (let n = line.number - 1; n >= Math.max(1, line.number - 8); n--) {
+        const l = doc.line(n);
+        if (headBlock.top - view.lineBlockAt(l.from).bottom > reach) break;
+        if (l.text.trim()) { textAbove = true; break; }
+      }
+      return {
+        geom,
+        head: head ? { x: head.left - domRect.left, top: toContentY(head.top), bottom: toContentY(head.bottom) } : null,
+        targets,
+        viewTop: toContentY(scrollRect.top),
+        viewBottom: toContentY(scrollRect.bottom),
+        textBelow,
+        textAbove,
+      };
+    }
+
+    apply(m, info) {
+      if (!m) return;
+      const { inserted, deleted, pulse, newlines, prevAnchor } = info;
+      this.geom = m.geom;
+      if (m.head) this.anchor = m.head;
+      if (!this.anchor) return;
+      this.updateFlip(m);
+      if (!inserted && !deleted && !pulse && !newlines && !this.rafId) return;
+      this.ensureCanvas();
+      const now = performance.now();
+      const baseline = this.baseline();
+      const dir = this.flip ? 1 : -1;
+      const amp = 10 + 14 * this.heat;
+      const many = m.targets.length > 6;
+      if (this.peak.x === null) this.peak.x = this.anchor.x;
+      this.peak.amp = Math.min(INK_WAVE.waveMax * 0.7, this.peak.amp + (inserted ? 5 : pulse ? 2 : 0));
+
+      m.targets.forEach((t, i) => {
+        this.pushBump({ x: t.x, amp });
+        // 乱码解码：落定前在字的位置上闪随机字形
+        this.scrambles.push({
+          x: t.x, y: t.y, size: t.size,
+          cjk: INK_CJK_RE.test(t.ch),
+          seed: (Math.random() * 1e6) | 0,
+          start: now + i * 12,
+          end: now + t.delay + 40,
+        });
+        const count = many ? 2 : 4;
+        for (let k = 0; k < count; k++) {
+          const sx = t.x + (Math.random() - 0.5) * 60;
+          const sy = baseline + dir * (8 + Math.random() * amp);
+          const dur = 300 + Math.random() * 130;
+          // 到达时刻对齐落字动画，起飞时间倒推
+          const start = now + Math.max(0, t.delay - dur * 0.92) + k * 16;
+          this.pushParticle({
+            sx, sy,
+            cx: (sx + t.x) / 2 + (Math.random() - 0.5) * 44,
+            cy: this.flip ? sy - 10 - Math.random() * 24 : Math.min(sy, t.y) - 26 - Math.random() * 36,
+            tx: t.x + (Math.random() - 0.5) * Math.max(3, t.width * 0.6),
+            ty: t.y + (Math.random() - 0.5) * t.size * 0.4,
+            start, dur, trail: [], spark: k === 0,
+          });
+        }
+        if (INK_BLOOM_RE.test(t.ch)) this.bloom(t, now + t.delay);
+      });
+
+      if (newlines) {
+        // 回车：一道浪从原光标位置往左扫过基线
+        const fromX = prevAnchor ? prevAnchor.x : this.geom.contentRight;
+        this.pushBump({ x: fromX, amp: 26, vx: -1500, tau: 0.7 });
+        this.pushBump({ x: fromX, amp: 10, vx: 600, tau: 0.45 });
+        this.peak.amp = Math.min(INK_WAVE.waveMax * 0.7, this.peak.amp + 8);
+      }
+
+      if (deleted) {
+        const x = this.anchor.x;
+        this.pushBump({ x, amp: 6 + 4 * this.heat });
+        const n = Math.min(5, 2 + deleted);
+        for (let k = 0; k < n; k++) {
+          const tx = x + (Math.random() - 0.5) * 60;
+          const ty = baseline + dir * (4 + Math.random() * 6);
+          const sy = (this.anchor.top + this.anchor.bottom) / 2;
+          this.pushParticle({
+            sx: x, sy,
+            cx: (x + tx) / 2 + (Math.random() - 0.5) * 30,
+            cy: this.flip ? (sy + ty) / 2 : sy - 14 - Math.random() * 18,
+            tx, ty,
+            start: now + k * 22, dur: 380 + Math.random() * 160, trail: [], fall: true,
+          });
+        }
+      }
+      if (pulse && !m.targets.length) this.pushBump({ x: this.anchor.x, amp: 4 + 5 * this.heat });
+      this.startLoop();
+    }
+
+    baseline() {
+      return this.flip
+        ? this.anchor.top - INK_WAVE.waveGap - INK_WAVE.waveMax
+        : this.anchor.bottom + INK_WAVE.waveGap + INK_WAVE.waveMax;
+    }
+
+    updateFlip(m) {
+      if (!this.anchor || typeof m.viewBottom !== "number") return;
+      const reach = INK_WAVE.waveGap + INK_WAVE.waveMax + INK_WAVE.bandBottomPad;
+      const roomBelow = m.viewBottom - this.anchor.bottom;
+      const roomAbove = this.anchor.top - m.viewTop;
+      let flip = this.flip;
+      // 留 28px 回差，免得光标在边界附近来回翻
+      if (!flip && roomBelow < reach && roomAbove > reach) flip = true;
+      else if (flip && roomBelow > reach + 28) flip = false;
+      if (flip !== this.flip) {
+        this.flip = flip;
+        this.bandTop = null;
+      }
+      this.crowded = flip ? m.textAbove : m.textBelow;
+      // 刚出现时直接用目标亮度，免得压在正文上先亮一下再变淡
+      if (!this.rafId) this.dim = this.crowded ? 0.32 : 1;
+    }
+
+    bloom(t, at) {
+      for (let k = 0; k < 22; k++) {
+        const ang = -Math.PI / 2 + (k / 22 - 0.5) * Math.PI * 1.7 + (Math.random() - 0.5) * 0.3;
+        const speed = 110 + Math.random() * 150;
+        this.pushSpark({
+          x: t.x, y: t.y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
+          born: at, life: 520 + Math.random() * 260,
+        });
+      }
+    }
+
+    pushBump(b) {
+      this.bumps.push(b);
+      if (this.bumps.length > INK_WAVE.maxBumps) this.bumps.splice(0, this.bumps.length - INK_WAVE.maxBumps);
+    }
+
+    pushParticle(p) {
+      this.particles.push(p);
+      if (this.particles.length > INK_WAVE.maxParticles) {
+        this.particles.splice(0, this.particles.length - INK_WAVE.maxParticles);
+      }
+    }
+
+    pushSpark(s) {
+      this.sparks.push(s);
+      if (this.sparks.length > INK_WAVE.maxSparks) this.sparks.splice(0, this.sparks.length - INK_WAVE.maxSparks);
+    }
+
+    ensureCanvas() {
+      if (this.canvas?.isConnected) return;
+      const doc = this.view.dom.ownerDocument;
+      const canvas = doc.createElement("canvas");
+      canvas.className = "crisp-focus-ink-wave";
+      canvas.setAttribute("aria-hidden", "true");
+      this.view.dom.appendChild(canvas);
+      this.canvas = canvas;
+      this.ctx = canvas.getContext("2d");
+      this.canvasW = 0;
+      this.canvasTop = null;
+    }
+
+    startLoop() {
+      if (this.rafId) return;
+      this.lastFrameAt = 0;
+      const win = this.win();
+      this.rafId = win.requestAnimationFrame((t) => this.frame(t));
+    }
+
+    stopLoop(clear = true) {
+      if (this.rafId) {
+        this.win().cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+      if (clear && this.canvas) {
+        this.canvas.remove();
+        this.canvas = null;
+        this.ctx = null;
+      }
+      this.bumps = [];
+      this.particles = [];
+      this.sparks = [];
+      this.scrambles = [];
+      this.peak = { x: null, v: 0, amp: 0 };
+      this.bandTop = null;
+      this.flip = false;
+      this.dim = 1;
+    }
+
+    waveHeight(x, tSec) {
+      let h = 2.5;
+      const twoSigma2 = 2 * INK_WAVE.sigma * INK_WAVE.sigma;
+      for (const b of this.bumps) {
+        const d = x - b.x;
+        h += b.amp * Math.exp(-(d * d) / twoSigma2);
+      }
+      if (this.peak.x !== null && this.peak.amp > 0.3) {
+        const d = x - this.peak.x;
+        const shimmer = 1 + 0.12 * Math.sin(tSec * 7 + x / 18);
+        h += this.peak.amp * shimmer * Math.exp(-(d * d) / (2 * INK_WAVE.peakSigma * INK_WAVE.peakSigma));
+      }
+      h += 2.6 * this.heat * (1 + Math.sin(x / 26 - tSec * 3.2));
+      return Math.min(INK_WAVE.waveMax, h);
+    }
+
+    step(dt, now) {
+      const live = Date.now() - this.lastInputAt < INK_WAVE.idleMs;
+      this.alpha += ((live ? 1 : 0) - this.alpha) * Math.min(1, dt * (live ? 12 : 2.4));
+      this.heat *= Math.exp(-dt / 1.4);
+      this.dim += ((this.crowded ? 0.32 : 1) - this.dim) * Math.min(1, dt * 6);
+      this.bumps = this.bumps.filter((b) => {
+        if (b.vx) b.x += b.vx * dt;
+        b.amp *= Math.exp(-dt / (b.tau || 0.42));
+        return b.amp > 0.3;
+      });
+      // 主峰：弹簧跟随光标，打字时涨高，停手后回落
+      if (this.anchor && this.peak.x !== null) {
+        const k = 140;
+        const damp = 20;
+        const a = (this.anchor.x - this.peak.x) * k - this.peak.v * damp;
+        this.peak.v += a * dt;
+        this.peak.x += this.peak.v * dt;
+      }
+      this.peak.amp *= Math.exp(-dt / (live ? 0.9 : 0.35));
+      this.particles = this.particles.filter((p) => {
+        if (now < p.start + p.dur) return true;
+        if (p.spark) {
+          for (let i = 0; i < 3; i++) {
+            const ang = -Math.PI / 2 + (Math.random() - 0.5) * 2.2;
+            const speed = 40 + Math.random() * 60;
+            this.pushSpark({
+              x: p.tx, y: p.ty, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
+              born: now, life: 220 + Math.random() * 120,
+            });
+          }
+        }
+        return false;
+      });
+      this.sparks = this.sparks.filter((s) => now < s.born + s.life);
+      this.scrambles = this.scrambles.filter((s) => now < s.end + 80);
+    }
+
+    frame(t) {
+      this.rafId = null;
+      const view = this.view;
+      if (!this.canvas || !this.ctx || !view.dom.isConnected || !this.geom || !this.anchor) {
+        this.stopLoop();
+        return;
+      }
+      if (!isInkWaveActive(plugin, view)) {
+        this.stopLoop();
+        return;
+      }
+      const dt = this.lastFrameAt ? Math.min(0.05, (t - this.lastFrameAt) / 1000) : 1 / 60;
+      this.lastFrameAt = t;
+      const now = performance.now();
+      this.step(dt, now);
+
+      if (this.alpha < 0.01 && !this.particles.length && !this.sparks.length && !this.scrambles.length) {
+        this.stopLoop();
+        return;
+      }
+
+      const geom = this.geom;
+      const win = this.win();
+      const dpr = win.devicePixelRatio || 1;
+      const H = INK_WAVE.bandHeight;
+      const baseline = this.baseline();
+      const dir = this.flip ? 1 : -1;
+      const targetTop = this.flip ? baseline - INK_WAVE.bandBottomPad : baseline + INK_WAVE.bandBottomPad - H;
+      this.bandTop = this.bandTop === null
+        ? targetTop
+        : this.bandTop + (targetTop - this.bandTop) * Math.min(1, dt * 16);
+      const scrollTop = view.scrollDOM.scrollTop || 0;
+      const cssTop = Math.round((this.bandTop - scrollTop + geom.offsetTop) * 2) / 2;
+      const canvas = this.canvas;
+      const W = Math.max(1, Math.round(geom.width));
+      if (this.canvasW !== W || this.canvasDpr !== dpr) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        canvas.style.width = `${W}px`;
+        canvas.style.height = `${H}px`;
+        this.canvasW = W;
+        this.canvasDpr = dpr;
+      }
+      if (this.canvasTop !== cssTop) {
+        canvas.style.top = `${cssTop}px`;
+        this.canvasTop = cssTop;
+      }
+
+      const ctx = this.ctx;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = geom.color;
+      ctx.strokeStyle = geom.color;
+      const bandTop = this.bandTop;
+      const baseLocal = baseline - bandTop;
+      const tSec = t / 1000;
+      const style = plugin.settings?.typewriterInkWaveStyle === "dots" ? "dots" : "ascii";
+      const left = geom.contentLeft;
+      const right = geom.contentRight;
+
+      if (this.alpha > 0.01 && right > left) {
+        ctx.font = geom.font;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const cw = Math.max(4, ctx.measureText("M").width);
+        const cols = Math.floor((right - left) / cw);
+        const tick = Math.floor(t / 85);
+        const rowH = INK_WAVE.rowHeight;
+        for (let c = 0; c < cols; c++) {
+          const x = left + c * cw + cw / 2;
+          const edge = Math.min(1, (x - left) / INK_WAVE.edgeFade, (right - x) / INK_WAVE.edgeFade);
+          if (edge <= 0) continue;
+          const h = this.waveHeight(x, tSec);
+          const rows = Math.max(1, Math.ceil(h / rowH));
+          // 峰越高越亮：让主山成为视觉中心
+          const lift = Math.min(1, h / INK_WAVE.waveMax);
+          for (let r = 0; r < rows; r++) {
+            const frac = rows > 1 ? r / (rows - 1) : 0;
+            const y = baseLocal + dir * r * rowH;
+            const rnd = inkHash(c, r, tick + (c % 3));
+            // 只有一行时是静止的基线：用轻字符、更淡
+            const a = this.alpha * this.dim * edge * (0.12 + 0.3 * (1 - frac) + 0.22 * lift) * (rows === 1 ? 0.42 : 1);
+            if (a < 0.01) continue;
+            ctx.globalAlpha = Math.min(0.8, a);
+            if (style === "dots") {
+              if (rnd < 0.22) continue;
+              const s = 0.9 + 1.5 * (1 - frac) * rnd + lift * 0.6;
+              ctx.fillRect(x - s / 2, y - s / 2, s, s);
+            } else {
+              const palette = rows === 1
+                ? INK_GLYPHS_LIGHT
+                : frac < 0.34 ? INK_GLYPHS_HEAVY : frac < 0.67 ? INK_GLYPHS_MID : INK_GLYPHS_LIGHT;
+              ctx.fillText(palette[Math.floor(rnd * palette.length)], x, y);
+            }
+          }
+        }
+      }
+
+      // 乱码解码
+      if (this.scrambles.length) {
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const tick = Math.floor(now / 55);
+        this.scrambles.forEach((s, i) => {
+          if (now < s.start) return;
+          const fadeIn = Math.min(1, (now - s.start) / 60);
+          const fadeOut = now > s.end ? 1 - (now - s.end) / 80 : 1;
+          const a = 0.78 * fadeIn * Math.max(0, fadeOut);
+          if (a <= 0.01) return;
+          const palette = s.cjk ? INK_SCRAMBLE_CJK : INK_SCRAMBLE_LATIN;
+          const glyph = palette[Math.floor(inkHash(s.seed, i, tick) * palette.length)];
+          ctx.font = `${Math.round(s.size * (s.cjk ? 0.72 : 0.7))}px ${geom.textFamily}`;
+          ctx.globalAlpha = a;
+          ctx.fillText(glyph, s.x, s.y - bandTop);
+        });
+      }
+
+      // 粒子：光晕 + 连线拖尾 + 亮核
+      for (const p of this.particles) {
+        if (now < p.start) continue;
+        const raw = Math.min(1, (now - p.start) / p.dur);
+        const e = p.fall ? raw * raw : 1 - Math.pow(1 - raw, 2.2);
+        const u = 1 - e;
+        const x = u * u * p.sx + 2 * u * e * p.cx + e * e * p.tx;
+        const y = u * u * p.sy + 2 * u * e * p.cy + e * e * p.ty - bandTop;
+        p.trail.push(x, y);
+        if (p.trail.length > 14) p.trail.splice(0, 2);
+        const fade = p.fall ? 1 - raw * 0.6 : Math.min(1, raw * 6) * (1 - (Math.max(0, raw - 0.85) / 0.15) * 0.6);
+        if (p.trail.length >= 4) {
+          ctx.lineWidth = 1;
+          for (let i = 2; i < p.trail.length; i += 2) {
+            const k = i / p.trail.length;
+            ctx.globalAlpha = 0.5 * fade * k * k;
+            ctx.beginPath();
+            ctx.moveTo(p.trail[i - 2], p.trail[i - 1]);
+            ctx.lineTo(p.trail[i], p.trail[i + 1]);
+            ctx.stroke();
+          }
+        }
+        ctx.globalAlpha = 0.1 * fade;
+        ctx.fillRect(x - 3, y - 3, 6, 6);
+        ctx.globalAlpha = 0.92 * fade;
+        ctx.fillRect(x - 1, y - 1, 2, 2);
+      }
+
+      // 火花：落点迸溅与句末绽放，带重力
+      for (const s of this.sparks) {
+        if (now < s.born) continue;
+        const age = (now - s.born) / 1000;
+        const life = s.life / 1000;
+        const x = s.x + s.vx * age;
+        const y = s.y + s.vy * age + 0.5 * 420 * age * age - bandTop;
+        const k = 1 - age / life;
+        if (k <= 0) continue;
+        const size = 1.2 + 1.4 * k;
+        ctx.globalAlpha = 0.12 * k;
+        ctx.fillRect(x - size * 1.6, y - size * 1.6, size * 3.2, size * 3.2);
+        ctx.globalAlpha = 0.95 * k;
+        ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      }
+
+      ctx.globalAlpha = 1;
+      this.rafId = win.requestAnimationFrame((ts) => this.frame(ts));
+    }
+
+    destroy() {
+      this.stopLoop();
+      if (this.composeTimer) {
+        this.win().clearTimeout(this.composeTimer);
+        this.composeTimer = null;
+      }
+      this.view?.contentDOM?.removeEventListener("compositionend", this.onCompositionEnd);
+    }
+  }
+
+  return cmView.ViewPlugin.fromClass(CrispInkWaveViewPlugin, {
+    decorations: (v) => v.decorations,
+  });
+}
+
+// --------------------------------------------------------------------------
 // 4. Settings Schema & Apple Spring Accordion Settings Tab
 // --------------------------------------------------------------------------
 const FOCUS_SCENES = Object.freeze({
@@ -2046,6 +2749,8 @@ const DEFAULT_SETTINGS = {
   typewriterScrollTolerance: 10, // soft mode margin % (5 - 25, default 10)
   typewriterScrollBottomPadding: true, // inject viewport bottom padding
   typewriterScrollSmooth: true, // smooth scroll transition
+  typewriterInkWaveEnabled: false, // 落字特效（独立功能，需要激活）
+  typewriterInkWaveStyle: "ascii", // ascii | dots
   typewriterAudioEnabled: false,
   soundTheme: "typewriter", // typewriter, mechanical, raindrop, retro8bit, woodenFish
   typewriterVolume: 0.7,
@@ -2622,6 +3327,40 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           })
       );
 
+    // Card 2b: 落字特效（独立于打字机定焦，需要激活）
+    const inkCard = createGroup(
+      "落字特效",
+      focusEntitled(this.plugin) ? "" : "需要激活",
+      false
+    );
+
+    new obsidian.Setting(inkCard)
+      .setName("启用落字特效")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(!!this.plugin.settings.typewriterInkWaveEnabled)
+          .onChange(async (val) => {
+            this.plugin.settings.typewriterInkWaveEnabled = val;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.typewriterInkWaveEnabled) {
+      new obsidian.Setting(inkCard)
+        .setName("画法")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("ascii", "字符")
+            .addOption("dots", "点阵")
+            .setValue(this.plugin.settings.typewriterInkWaveStyle === "dots" ? "dots" : "ascii")
+            .onChange(async (val) => {
+              this.plugin.settings.typewriterInkWaveStyle = val;
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
     // Card 3: Multi-Theme Audio Engine
     const audioCard = createGroup(
       "声音反馈",
@@ -2865,6 +3604,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const typewriterExt = createTypewriterExtension(this);
     if (typewriterExt && typeof this.registerEditorExtension === "function") {
       this.registerEditorExtension(typewriterExt);
+    }
+    const inkWaveExt = createInkWaveExtension(this);
+    if (inkWaveExt && typeof this.registerEditorExtension === "function") {
+      this.registerEditorExtension(inkWaveExt);
     }
 
     // Patch CM6 native cursor layer

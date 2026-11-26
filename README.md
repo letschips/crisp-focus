@@ -13,6 +13,7 @@ ambient soundscapes to Obsidian.
 - Dual-mode typewriter scrolling (requires activation) with adjustable eye-line height, a soft tolerance band, and viewport-aware end padding.
 - Manual wheel, touch, and scrollbar movement temporarily yields control until writing resumes; mouse clicks and drag selections never move the page.
 - Adjustable animated cursor with reduced-motion support.
+- Ink drop effect (requires activation): a character wave beside the caret; new characters decode from noise as particles land, Enter sweeps the wave, and sentence-ending punctuation blooms. Works in any editing mode, flips above the caret near the bottom edge, dims over nearby text, and stays off with reduced motion, on mobile and in Canvas cards.
 - Five synthesized typing themes with a shared output limiter.
 - Independent space/IME confirmation and Enter bell switches. The space preference survives scene changes.
 - Four bundled local ambient soundscapes with normalized loudness.

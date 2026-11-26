@@ -330,6 +330,7 @@ module.exports.__test = {
   CrispFocusPlugin,
   CrispTypewriterEngine: typeof CrispTypewriterEngine === "function" ? CrispTypewriterEngine : undefined,
   createTypewriterExtension: typeof createTypewriterExtension === "function" ? createTypewriterExtension : undefined,
+  isInkWaveActive: typeof isInkWaveActive === "function" ? isInkWaveActive : undefined,
   FocusSessionController: typeof FocusSessionController === "function" ? FocusSessionController : undefined,
   FOCUS_SCENES: typeof FOCUS_SCENES === "object" ? FOCUS_SCENES : undefined,
   ensureCursorLayerPatched,
@@ -3244,4 +3245,30 @@ test("inherit: the scan runs once per load", async () => {
     assert.equal(calls.list, 1);
     assert.equal(entitled(), false);
   } finally { plugin.onunload(); }
+});
+
+test("1.11 落字特效 needs activation and no longer depends on typewriter scrolling", () => {
+  const { CrispFocusPlugin, isInkWaveActive } = loadPluginInternals();
+  const plugin = new CrispFocusPlugin();
+  plugin.settings = { focusModeEnabled: true, typewriterScrollEnabled: false, typewriterInkWaveEnabled: true };
+  const view = {
+    dom: {
+      closest: () => null,
+      ownerDocument: { defaultView: { matchMedia: () => ({ matches: false }) } },
+    },
+  };
+  assert.equal(isInkWaveActive(plugin, view), false, "unactivated: never draws even with the switch on");
+  plugin.__focusTest.entitle();
+  assert.equal(isInkWaveActive(plugin, view), true, "activated: works with typewriter scrolling off");
+  plugin.settings.typewriterInkWaveEnabled = false;
+  assert.equal(isInkWaveActive(plugin, view), false);
+  plugin.settings.typewriterInkWaveEnabled = true;
+  plugin.settings.focusModeEnabled = false;
+  assert.equal(isInkWaveActive(plugin, view), false, "the Focus master switch still stops it");
+  plugin.settings.focusModeEnabled = true;
+  view.dom.closest = () => ({});
+  assert.equal(isInkWaveActive(plugin, view), false, "Canvas cards and modals stay excluded");
+  view.dom.closest = () => null;
+  view.dom.ownerDocument.defaultView.matchMedia = () => ({ matches: true });
+  assert.equal(isInkWaveActive(plugin, view), false, "reduced motion turns it off");
 });

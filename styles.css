@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.10.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.0)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -631,4 +631,27 @@ body.crisp-focus-clean-typing .sidebar-toggle-button {
 
 .crisp-focus-session-status.is-locked {
   display: none;
+}
+
+/* Ink Wave: 落字特效（字符波与落字） */
+.cm-editor > .crisp-focus-ink-wave {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.cm-editor .crisp-focus-ink-land {
+  animation: crisp-focus-ink-land 360ms ease-out both;
+}
+
+@keyframes crisp-focus-ink-land {
+  from {
+    color: color-mix(in srgb, currentColor 4%, transparent);
+    text-shadow: 0 0 2px color-mix(in srgb, var(--text-faint) 40%, transparent);
+  }
+  to {
+    text-shadow: 0 0 0 transparent;
+  }
 }
