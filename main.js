@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.0)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.1)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -910,7 +910,18 @@ class CrispFocusAudioEngine {
   async loadAmbientBuffer(soundName, request = this.ambientRequest) {
     if (this.ambientBuffer?.name === soundName) return this.ambientBuffer.buffer;
     const configDir = this.app.vault.configDir || ".obsidian";
-    const data = await this.app.vault.adapter.readBinary(`${configDir}/plugins/crisp-focus/audio/${soundName}.mp3`);
+    const dir = this.pluginDir || `${configDir}/plugins/crisp-focus`;
+    const path = `${dir}/audio/${soundName}.mp3`;
+    let data;
+    try {
+      data = await this.app.vault.adapter.readBinary(path);
+    } catch (err) {
+      if (!this.missingAudioNoticed) {
+        this.missingAudioNoticed = true;
+        new obsidian.Notice("Crisp Focus 找不到环境音文件。请下载 Release 里的完整包（含 audio 文件夹），放进插件目录。", 10000);
+      }
+      throw err;
+    }
     const ctx = this.ctx;
     if (request !== this.ambientRequest) return null;
     if (!ctx) throw new Error("Audio context closed while loading ambient sound");
@@ -1113,12 +1124,14 @@ function debounceHelper(fn, delay, resetTimer = false) {
     return obsidian.debounce(fn, delay, resetTimer);
   }
   let timer = null;
+  let latest = [];
   return function (...args) {
+    latest = args;
     if (resetTimer && timer) clearTimeout(timer);
     if (!timer || resetTimer) {
       timer = setTimeout(() => {
         timer = null;
-        fn.apply(this, args);
+        fn.apply(this, latest);
       }, delay);
     }
   };
@@ -1357,7 +1370,7 @@ class CrispTypewriterEngine {
   requestScroll(view, reason = "update", docChanged = false) {
     if (!view || !view.scrollDOM) return;
     if (this.userScrolling) return;
-    if (this.plugin?.isComposing) return;
+    if (view.composing) return;
     const settings = this.plugin?.settings;
     if (!isTypewriterActive(this.plugin)) return;
 
@@ -1627,9 +1640,9 @@ const INK_GLYPHS_MID = "*+=xoXO0a";
 const INK_GLYPHS_LIGHT = ".:-~'^`,";
 const INK_SCRAMBLE_LATIN = "!<>-_\\/[]{}=+*^?#%&0123456789ABCDEFXZ";
 const INK_SCRAMBLE_CJK = "丨丿丶乙十口日月木水火土人大己巳ノ二三工山";
-const INK_CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/;
+const INK_CJK_RE = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u;
 const INK_BLOOM_RE = /[。！？.!?…]/;
-const INK_EXCLUDED_HOSTS = ".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal";
+const INK_EXCLUDED_HOSTS = ".canvas-node, .canvas-node-content, .workspace-leaf-content[data-type='canvas'], .prompt, .modal, .table-cell-wrapper, .cm-table-widget";
 
 function isInkWaveActive(plugin, view) {
   if (!plugin?.settings?.focusModeEnabled || !focusEntitled(plugin)) return false;
@@ -1668,7 +1681,8 @@ function createInkWaveExtension(plugin) {
     constructor(view) {
       this.view = view;
       this.decorations = Decoration.none;
-      this.landings = [];
+      this.destroyed = false;
+      this.cleanupTimer = null;
       this.bumps = [];
       this.particles = [];
       this.sparks = [];
@@ -1710,28 +1724,20 @@ function createInkWaveExtension(plugin) {
 
     update(update) {
       const now = Date.now();
-      let rebuild = false;
-      if (this.landings.length) {
-        let next = this.landings.filter((l) => l.expiresAt > now);
-        if (update.docChanged) {
-          next = next
-            .map((l) => ({ ...l, from: update.changes.mapPos(l.from, 1), to: update.changes.mapPos(l.to, -1) }))
-            .filter((l) => l.to > l.from);
-        }
-        rebuild = next.length !== this.landings.length || update.docChanged;
-        this.landings = next;
+      // 落字装饰建好后只做映射和过期清理，不再改写已有节点的 animation-delay
+      if (this.decorations.size) {
+        if (update.docChanged) this.decorations = this.decorations.map(update.changes);
+        this.decorations = this.decorations.update({ filter: (_from, _to, deco) => deco.spec.inkExpires > now });
       }
 
       const active = isInkWaveActive(plugin, update.view);
       if (!active) {
         this.composeFrom = null;
-        if (this.landings.length) {
-          this.landings = [];
-          rebuild = true;
-        }
-        if (rebuild) this.rebuildDecorations();
+        this.decorations = Decoration.none;
         return;
       }
+      // 没有焦点的编辑器收到的改动不是在这里打的字（比如表格单元格同步回主编辑器）：不发射
+      if (!update.view.hasFocus) return;
 
       if (this.composeFrom !== null && update.docChanged) {
         this.composeFrom = update.changes.mapPos(this.composeFrom, -1);
@@ -1769,10 +1775,15 @@ function createInkWaveExtension(plugin) {
       }
 
       // 输入法上屏：组字区间 [composeFrom, 光标] 就是这次上屏的字
-      if (this.composeFrom !== null && !update.view.composing && !plugin.isComposing) {
+      if (this.composeFrom !== null && !update.view.composing) {
         const head = update.state.selection.main.head;
         const from = Math.max(0, Math.min(this.composeFrom, head));
         if (head > from && head - from <= INK_WAVE.maxPasteChars) {
+          // 有的输入法上屏事务本身也带 input 事件：同一段字只算一次
+          for (let i = inserts.length - 1; i >= 0; i--) {
+            const ins = inserts[i];
+            if (ins.from < head && ins.from + ins.text.length > from) inserts.splice(i, 1);
+          }
           inserts.push({ from, text: update.state.doc.sliceString(from, head) });
         }
         this.composeFrom = null;
@@ -1781,24 +1792,31 @@ function createInkWaveExtension(plugin) {
       const chars = [];
       let newlines = 0;
       inserts.forEach((ins) => {
-        for (let i = 0; i < ins.text.length; i++) {
-          const ch = ins.text[i];
+        // 按码位走：Emoji、扩展区汉字是一个字，不拆成两段
+        let offset = 0;
+        for (const ch of ins.text) {
+          const pos = ins.from + offset;
+          offset += ch.length;
           if (ch === "\n") {
             newlines += 1;
             continue;
           }
           if (ch === "\r") continue;
-          chars.push({ pos: ins.from + i, ch });
+          chars.push({ pos, len: ch.length, ch });
         }
       });
       const batch = chars.slice(-INK_WAVE.maxBatchChars);
+      const added = [];
       batch.forEach((c, i) => {
         c.delay = INK_WAVE.landBaseDelay + i * INK_WAVE.landStagger;
         if (/\s/.test(c.ch)) return;
-        this.landings.push({ from: c.pos, to: c.pos + 1, delay: c.delay, expiresAt: now + c.delay + 520 });
-        rebuild = true;
+        added.push(Decoration.mark({
+          class: "crisp-focus-ink-land",
+          attributes: { style: `animation-delay:${c.delay}ms` },
+          inkExpires: now + c.delay + 520,
+        }).range(c.pos, c.pos + c.len));
       });
-      if (rebuild) this.rebuildDecorations();
+      if (added.length) this.decorations = this.decorations.update({ add: added, sort: true });
 
       if (!batch.length && !deleted && !pulse && !newlines && !update.selectionSet) return;
       if (batch.length || deleted || pulse || newlines) {
@@ -1812,54 +1830,32 @@ function createInkWaveExtension(plugin) {
       });
     }
 
-    rebuildDecorations() {
-      if (!this.landings.length) {
-        this.decorations = Decoration.none;
-        return;
-      }
-      const now = Date.now();
-      const ranges = this.landings.map((l) => {
-        const elapsed = now - (l.expiresAt - l.delay - 520);
-        return Decoration.mark({
-          class: "crisp-focus-ink-land",
-          attributes: { style: `animation-delay:${Math.round(l.delay - elapsed)}ms` },
-        }).range(l.from, l.to);
-      });
-      this.decorations = Decoration.set(ranges, true);
-    }
-
     measure(view, batch) {
       const domRect = view.dom.getBoundingClientRect();
       const scrollRect = view.scrollDOM.getBoundingClientRect();
       const scrollTop = view.scrollDOM.scrollTop || 0;
       const toContentY = (clientY) => clientY - scrollRect.top + scrollTop;
       const head = view.coordsAtPos(view.state.selection.main.head);
-      let geom = this.geom;
-      if (!geom || Math.abs(geom.width - domRect.width) > 0.5) {
-        const win = this.win();
-        const contentStyle = win.getComputedStyle(view.contentDOM);
-        const line = view.contentDOM.querySelector(".cm-line");
-        const lineRect = line ? line.getBoundingClientRect() : view.contentDOM.getBoundingClientRect();
-        const lineStyle = line ? win.getComputedStyle(line) : contentStyle;
-        const padL = parseFloat(lineStyle.paddingLeft) || 0;
-        const padR = parseFloat(lineStyle.paddingRight) || 0;
-        const mono = (win.getComputedStyle(view.dom.ownerDocument.body).getPropertyValue("--font-monospace") || "").trim();
-        geom = {
-          width: domRect.width,
-          contentLeft: lineRect.left - domRect.left + padL,
-          contentRight: lineRect.right - domRect.left - padR,
-          color: contentStyle.color || "#888",
-          font: `${INK_WAVE.fontSize}px ${mono || "ui-monospace, SFMono-Regular, Menlo, monospace"}`,
-          textFamily: contentStyle.fontFamily || "sans-serif",
-        };
-      }
-      geom.offsetTop = scrollRect.top - domRect.top;
+      // 每次输入都重读颜色和正文边界：切换明暗、类纸外观或「缩减行宽」时外框宽度可能不变
+      const win = this.win();
+      const contentStyle = win.getComputedStyle(view.contentDOM);
+      const contentRect = view.contentDOM.getBoundingClientRect();
+      const mono = (win.getComputedStyle(view.dom.ownerDocument.body).getPropertyValue("--font-monospace") || "").trim();
+      const geom = {
+        width: domRect.width,
+        contentLeft: contentRect.left - domRect.left + (parseFloat(contentStyle.paddingLeft) || 0),
+        contentRight: contentRect.right - domRect.left - (parseFloat(contentStyle.paddingRight) || 0),
+        color: contentStyle.color || "#888",
+        font: `${INK_WAVE.fontSize}px ${mono || "ui-monospace, SFMono-Regular, Menlo, monospace"}`,
+        textFamily: contentStyle.fontFamily || "sans-serif",
+        offsetTop: scrollRect.top - domRect.top,
+      };
       const targets = [];
       batch.forEach((c) => {
         if (/\s/.test(c.ch)) return;
         const a = view.coordsAtPos(c.pos, 1);
         if (!a) return;
-        const b = view.coordsAtPos(c.pos + 1, -1);
+        const b = view.coordsAtPos(c.pos + c.len, -1);
         const sameLine = b && Math.abs(b.top - a.top) < 2 && b.left > a.left;
         const x = sameLine ? (a.left + b.left) / 2 : a.left + 4;
         targets.push({
@@ -2065,6 +2061,13 @@ function createInkWaveExtension(plugin) {
       this.bandTop = null;
       this.flip = false;
       this.dim = 1;
+      // 停下时还挂着落字装饰（比如中途关掉开关）：补一个空事务，让 update 把它们清掉
+      if (this.decorations.size && !this.destroyed && !this.cleanupTimer) {
+        this.cleanupTimer = this.win().setTimeout(() => {
+          this.cleanupTimer = null;
+          if (!this.destroyed && this.view.dom.isConnected) this.view.dispatch({});
+        }, 0);
+      }
     }
 
     waveHeight(x, tSec) {
@@ -2286,6 +2289,11 @@ function createInkWaveExtension(plugin) {
     }
 
     destroy() {
+      this.destroyed = true;
+      if (this.cleanupTimer) {
+        this.win().clearTimeout(this.cleanupTimer);
+        this.cleanupTimer = null;
+      }
       this.stopLoop();
       if (this.composeTimer) {
         this.win().clearTimeout(this.composeTimer);
@@ -2620,9 +2628,9 @@ function pomodoroPhaseViewModel(snap, now) {
       actions: [paused ? { id: "resume", label: "继续", primary: true } : { id: "pause", label: "暂停", primary: true }, { id: "stop", label: "结束" }] };
   }
   if (!snap.entitled && !snap.active) {
-    return { state: "locked", tone: "focus", pill: "番茄钟", meta: "需要激活", time: formatSessionRemaining(snap.focusMinutes * 60000), sub: "激活后可用 · 单次专注免费", progress: 0,
+    return { state: "locked", tone: "focus", pill: "番茄钟", meta: "需要激活", time: formatSessionRemaining(snap.focusMinutes * 60000), sub: "激活后可用", progress: 0,
       slots: Array.from({ length: every }, () => ({ state: "next", p: 0 })), foot: null,
-      actions: [{ id: "activate", label: "前往激活", primary: true }, { id: "single", label: "单次专注" }] };
+      actions: [{ id: "activate", label: "前往激活", primary: true }] };
   }
   if (snap.kind === "focus" && running) {
     const index = (snap.round - 1) % every;
@@ -2823,8 +2831,11 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
   onSessionUpdate(snapshot, reason) {
     if (!this.sessionControlSetting || !this.containerEl?.isConnected) return;
     // 会话可能在状态栏面板、命令或番茄阶段切换里变了：按钮跟着重画，每秒只更新剩余时间
-    if (reason === "tick") {
-      this.sessionControlSetting.setDesc(`剩余 ${formatSessionRemaining(snapshot.remainingMs)}`);
+    const active = this.containerEl.ownerDocument?.activeElement;
+    const editing = active && this.containerEl.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName);
+    if (reason === "tick" || editing) {
+      // 正在填授权码或数字时不重建整页，只更新剩余时间；失焦后下一次变化再重画
+      this.sessionControlSetting.setDesc(snapshot.status === "idle" ? "" : `剩余 ${formatSessionRemaining(snapshot.remainingMs)}`);
     } else {
       this.display();
     }
@@ -2840,7 +2851,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
     if (!focusEntitled(this.plugin)) {
       containerEl.createEl("p", {
         cls: "crisp-focus-locked-note",
-        text: "Crisp Focus 未激活：专注模式、光标、打字音、环境音、专注会话和番茄钟都需要激活后使用。授权码在页面底部填写。",
+        text: "Crisp Focus 未激活：专注模式、光标、打字机定焦、清爽打字、落字特效、打字音、环境音、专注会话和番茄钟都需要激活后使用。授权码在下方「软件授权」中填写。",
       });
     }
 
@@ -2887,13 +2898,13 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         if (details.open) {
           details.classList.remove("is-open");
           details.classList.add("is-closing");
-          window.setTimeout(() => {
+          (details.ownerDocument?.defaultView || window).setTimeout(() => {
             details.open = false;
             details.classList.remove("is-closing");
           }, 240);
         } else {
           details.open = true;
-          window.requestAnimationFrame(() => {
+          (details.ownerDocument?.defaultView || window).requestAnimationFrame(() => {
             details.classList.add("is-open");
           });
         }
@@ -2987,14 +2998,17 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         });
       });
 
+    const inPomodoro = Boolean(this.plugin.settings.pomodoroState?.active);
     this.sessionControlSetting = new obsidian.Setting(sessionGroup)
       .setName("会话控制")
       .setDesc(sessionSnapshot.status === "idle"
-        ? ""
+        ? (inPomodoro ? "番茄钟进行中，在番茄钟面板里操作" : "")
         : `剩余 ${formatSessionRemaining(sessionSnapshot.remainingMs)}`)
       .addButton((button) => button
         .setButtonText(sessionSnapshot.status === "idle" ? "开始" : "重新开始")
         .setCta()
+        // 番茄进行中点「重新开始」会清掉整轮番茄
+        .setDisabled(inPomodoro)
         .onClick(async () => {
           await this.plugin.startFocusSession(this.plugin.settings.sessionDurationMinutes);
           this.display();
@@ -3334,17 +3348,27 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
       false
     );
 
-    new obsidian.Setting(inkCard)
+    const inkSetting = new obsidian.Setting(inkCard)
       .setName("启用落字特效")
       .addToggle((toggle) =>
         toggle
           .setValue(!!this.plugin.settings.typewriterInkWaveEnabled)
           .onChange(async (val) => {
-            this.plugin.settings.typewriterInkWaveEnabled = val;
-            await this.plugin.saveSettings();
+            await this.plugin.setInkEffectEnabled(val);
             this.display();
           })
       );
+    if (this.plugin.settings.typewriterInkWaveEnabled) {
+      const settingsWin = containerEl.ownerDocument?.defaultView || window;
+      let reducedMotion = false;
+      try {
+        reducedMotion = Boolean(settingsWin.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+      } catch (e) {
+        reducedMotion = false;
+      }
+      if (obsidian.Platform?.isMobile) inkSetting.setDesc("手机端不显示");
+      else if (reducedMotion) inkSetting.setDesc("系统开启了减少动态效果，暂不显示");
+    }
 
     if (this.plugin.settings.typewriterInkWaveEnabled) {
       new obsidian.Setting(inkCard)
@@ -3550,6 +3574,8 @@ class CrispFocusPlugin extends obsidian.Plugin {
       winObj,
       () => this.settings.typewriterSpaceEnabled !== false
     );
+    // 环境音按实际安装目录读，插件目录名不是 crisp-focus 时也能找到
+    this.audio.pluginDir = this.manifest?.dir || null;
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.classList.add("crisp-focus-session-status");
     this.statusBarEl.setAttr("aria-label", "Crisp Focus 番茄钟与专注会话");
@@ -3673,6 +3699,15 @@ class CrispFocusPlugin extends obsidian.Plugin {
     });
 
     this.addCommand({
+      id: "toggle-ink-effect",
+      name: "切换落字特效 / Toggle ink drop effect",
+      callback: async () => {
+        if (await this.setInkEffectEnabled(!this.settings.typewriterInkWaveEnabled) === false) return;
+        new obsidian.Notice(`Crisp Focus 落字特效已${this.settings.typewriterInkWaveEnabled ? "开启" : "关闭"}`);
+      }
+    });
+
+    this.addCommand({
       id: "toggle-typewriter-mode",
       name: "切换定焦模式（平滑/严格） / Toggle typewriter mode (Soft/Strict)",
       callback: async () => {
@@ -3730,7 +3765,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
     this.addCommand({
       id: "start-pomodoro",
       name: "开始番茄 / Start pomodoro",
-      callback: () => this.startPomodoro(),
+      // 休息结束、等下一个时接着这一轮（保留轮次和绑定的任务）；Crisp Pets 的「开始下一个」走这条命令
+      callback: () => (this.settings.pomodoroState?.waiting && this.session.getSnapshot().status === "idle"
+        ? this.startNextPomodoro()
+        : this.startPomodoro()),
     });
     this.addCommand({
       id: "skip-pomodoro-break",
@@ -4026,7 +4064,7 @@ class CrispFocusPlugin extends obsidian.Plugin {
     const view = new PomodoroPanelView(this, pop);
     const rect = anchor.getBoundingClientRect();
     pop.style.bottom = `${Math.max(8, win.innerHeight - rect.top + 8)}px`;
-    pop.style.right = `${Math.max(8, win.innerWidth - rect.right)}px`;
+    pop.style.right = `${Math.max(8, Math.min(win.innerWidth - rect.right, win.innerWidth - 296 - 8))}px`;
     const onPointer = (event) => {
       if (pop.contains(event.target) || anchor.contains(event.target)) return;
       this.closePomodoroPanel();
@@ -4314,7 +4352,6 @@ class CrispFocusPlugin extends obsidian.Plugin {
       this.emitSessionEvent("stop", { completed: false, elapsedMs: this.elapsedMs() });
     }
     if (!options.pomodoro) {
-      this.settings.sessionDurationMinutes = duration;
       this.settings.pomodoroState = null;
       this.settings.sessionMeta = {
         id: newSessionId(), kind: "focus", phase: "focus", pomodoro: false, round: 0,
@@ -4432,11 +4469,9 @@ class CrispFocusPlugin extends obsidian.Plugin {
     };
     const compositionStartHandler = () => {
       state.isComposing = true;
-      this.isComposing = true;
     };
     const compositionEndHandler = (evt) => {
       state.isComposing = false;
-      this.isComposing = false;
       // Cancellation is not a commit; restrict feedback to actual input hosts.
       if (evt.data === "" || !this.isAudioHostTarget(windowObj.document.activeElement)) return;
       state.lastCharKeydownAt = Date.now();
@@ -4613,6 +4648,16 @@ class CrispFocusPlugin extends obsidian.Plugin {
     if (!enabled) {
       this.clearCursorStyles();
     }
+  }
+
+  async setInkEffectEnabled(enabled) {
+    if (enabled && !focusEntitled(this)) {
+      new obsidian.Notice("🔒 落字特效属于 Crisp 激活用户专属功能");
+      return false;
+    }
+    this.settings.typewriterInkWaveEnabled = enabled;
+    await this.saveSettings();
+    return true;
   }
 
   async setTypewriterScrollEnabled(enabled) {

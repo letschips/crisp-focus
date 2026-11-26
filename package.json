@@ -1,6 +1,6 @@
 {
   "name": "crisp-focus",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "private": true,
   "scripts": {
     "test:e2e:license-hardening": "node tests/license-hardening.e2e.cjs",

@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 // Runtime whitelist. data.json (settings + license code) is never copied.
 const requiredFiles = ["main.js", "manifest.json", "styles.css"];
-const optionalFiles = ["LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md"];
+// README / package.json / versions.json 也同步，免得安装目录里留着旧版本的说明和版本表
+const optionalFiles = ["LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md", "README.md", "package.json", "versions.json"];
 const optionalDirectories = ["assets", "audio"];
 
 async function exists(path) {

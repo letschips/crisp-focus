@@ -331,6 +331,7 @@ module.exports.__test = {
   CrispTypewriterEngine: typeof CrispTypewriterEngine === "function" ? CrispTypewriterEngine : undefined,
   createTypewriterExtension: typeof createTypewriterExtension === "function" ? createTypewriterExtension : undefined,
   isInkWaveActive: typeof isInkWaveActive === "function" ? isInkWaveActive : undefined,
+  createInkWaveExtension: typeof createInkWaveExtension === "function" ? createInkWaveExtension : undefined,
   FocusSessionController: typeof FocusSessionController === "function" ? FocusSessionController : undefined,
   FOCUS_SCENES: typeof FOCUS_SCENES === "object" ? FOCUS_SCENES : undefined,
   ensureCursorLayerPatched,
@@ -2225,7 +2226,7 @@ test('non-object data.json content is treated as damaged, not as settings', asyn
    - 第 N 个之后该长休却给了短休；休息结束后不等用户就开始下一个。
    - 未激活也能开始番茄；中途结束没有告诉其他插件「这一段中断了」。
    - 重载后等待中的番茄丢失，或关着 Obsidian 时跑完的番茄被当成完成。 */
-async function pomodoroPlugin({ licensed = true, saved = {} } = {}) {
+async function pomodoroPlugin({ licensed = true, saved = {}, commands = null } = {}) {
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
@@ -2237,6 +2238,7 @@ async function pomodoroPlugin({ licensed = true, saved = {} } = {}) {
   plugin.loadData = async () => ({ sessionDurationMinutes: 25, ...saved });
   let persisted = null;
   plugin.saveData = async (value) => { persisted = JSON.parse(JSON.stringify(value)); };
+  if (commands) plugin.addCommand = (command) => { commands[command.id] = command; };
   await plugin.onload();
   const chimes = [];
   plugin.audio.playChime = (kind) => chimes.push(kind);
@@ -3271,4 +3273,114 @@ test("1.11 落字特效 needs activation and no longer depends on typewriter scr
   view.dom.closest = () => null;
   view.dom.ownerDocument.defaultView.matchMedia = () => ({ matches: true });
   assert.equal(isInkWaveActive(plugin, view), false, "reduced motion turns it off");
+});
+
+/* 1.11.1 审计修复。失败模式：
+   - 未激活的番茄面板还给「单次专注」入口，点了被门禁拒绝。
+   - 休息结束等下一个时，Crisp Pets 走 start-pomodoro 命令，把这一轮重置回 1/4 并丢掉绑定的任务。
+   - 命令开 50 分钟专注，把设置里的默认时长也改成 50。 */
+test("1.11.1 unactivated pomodoro panel only offers activation", () => {
+  const { pomodoroViewModel } = loadPluginInternals();
+  const locked = pomodoroViewModel({ status: "idle", remainingMs: 0, plannedMs: 0, kind: null, phase: null, pomodoro: false, active: false, waiting: false, round: 0, completedRounds: 0, every: 4, focusMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, todayCount: 0, todayFocusMinutes: 0, goal: 8, entitled: false });
+  assert.equal(locked.actions.map((a) => a.id).join(","), "activate");
+  assert.doesNotMatch(locked.sub, /免费/);
+});
+
+test("1.11.1 start-pomodoro continues a waiting cycle with its round and task", async () => {
+  const commands = {};
+  const { plugin, finish } = await pomodoroPlugin({ commands });
+  const task = { source: "crisp-tempo", id: "t1", title: "写周报" };
+  await plugin.startPomodoro({ task });
+  await finish();
+  await finish();
+  assert.equal(plugin.settings.pomodoroState.waiting, true);
+  await commands["start-pomodoro"].callback();
+  assert.equal(plugin.settings.sessionMeta.round, 2, "second pomodoro of the set, not a new set");
+  assert.equal(plugin.settings.pomodoroState.task?.id, "t1", "the bound task stays");
+  plugin.onunload();
+});
+
+test("1.11.1 starting a timed session keeps the saved default duration", async () => {
+  const { plugin } = await pomodoroPlugin();
+  await plugin.startFocusSession(50);
+  assert.equal(plugin.settings.sessionDurationMinutes, 25);
+  plugin.onunload();
+});
+
+/* 落字特效的输入结算。失败模式：
+   - 一个 Emoji 被拆成两段装饰、两份乱码和粒子。
+   - 输入法上屏事务带 input 事件时，同一段字被算两次。
+   - 未激活时留下装饰。 */
+function inkHarness({ entitled = true } = {}) {
+  class FakeSet {
+    constructor(ranges = []) { this.ranges = ranges; }
+    get size() { return this.ranges.length; }
+    map(changes) { return new FakeSet(this.ranges.map((r) => ({ ...r, from: changes.mapPos(r.from, 1), to: changes.mapPos(r.to, -1) })).filter((r) => r.to > r.from)); }
+    update({ add = [], filter } = {}) {
+      let ranges = this.ranges.concat(add);
+      if (filter) ranges = ranges.filter((r) => filter(r.from, r.to, r.value));
+      return new FakeSet(ranges);
+    }
+  }
+  const codemirrorView = {
+    ViewPlugin: { fromClass: (cls, spec) => ({ cls, spec }) },
+    Decoration: { none: new FakeSet(), mark: (spec) => ({ spec, range: (from, to) => ({ from, to, value: { spec } }) }) },
+  };
+  const { CrispFocusPlugin, createInkWaveExtension } = loadPluginInternals({ codemirrorView });
+  const plugin = new CrispFocusPlugin();
+  plugin.settings = { focusModeEnabled: true, typewriterInkWaveEnabled: true };
+  if (entitled) plugin.__focusTest.entitle();
+  const win = { matchMedia: () => ({ matches: false }), setTimeout: () => 1, clearTimeout() {} };
+  const view = {
+    composing: false,
+    hasFocus: true,
+    dom: { closest: () => null, ownerDocument: { defaultView: win }, isConnected: true },
+    contentDOM: { addEventListener() {}, removeEventListener() {} },
+    requestMeasure() {},
+    dispatch() {},
+  };
+  const inst = new (createInkWaveExtension(plugin).cls)(view);
+  let doc = "";
+  // 用 text 替换 [from, to)：输入法上屏是把拼音换成汉字
+  const tr = (events, from, to, text) => ({
+    docChanged: true,
+    isUserEvent: (name) => events.some((e) => e === name || e.startsWith(`${name}.`)),
+    changes: { iterChanges: (cb) => cb(from, to, from, from + text.length, { toString: () => text }), mapPos: (p) => p },
+  });
+  const send = (events, from, text, to = from) => {
+    doc = doc.slice(0, from) + text + doc.slice(to);
+    inst.update({
+      docChanged: true,
+      selectionSet: true,
+      changes: { mapPos: (p) => p },
+      transactions: [tr(events, from, to, text)],
+      view,
+      state: { selection: { main: { head: from + text.length } }, doc: { sliceString: (a, b) => doc.slice(a, b) } },
+    });
+  };
+  return { inst, view, send };
+}
+
+test("1.11.1 ink marks follow code points and count an IME commit once", () => {
+  const emoji = inkHarness();
+  emoji.send(["input.type"], 0, "😀");
+  assert.equal(emoji.inst.decorations.size, 1, "one emoji, one landing");
+  assert.equal(emoji.inst.decorations.ranges[0].to - emoji.inst.decorations.ranges[0].from, 2);
+
+  const ime = inkHarness();
+  ime.view.composing = true;
+  ime.send(["input.type.compose"], 0, "ni");
+  assert.equal(ime.inst.decorations.size, 0, "no landing while composing");
+  ime.view.composing = false;
+  ime.send(["input.type"], 0, "你好", 2);
+  assert.equal(ime.inst.decorations.size, 2, "the committed text lands once, not twice");
+
+  const synced = inkHarness();
+  synced.view.hasFocus = false;
+  synced.send(["input.type"], 0, "ab");
+  assert.equal(synced.inst.decorations.size, 0, "edits synced from a table cell editor do not fire in the main editor");
+
+  const locked = inkHarness({ entitled: false });
+  locked.send(["input.type"], 0, "ab");
+  assert.equal(locked.inst.decorations.size, 0, "unactivated leaves nothing behind");
 });
