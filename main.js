@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.2)
+   Crisp Focus - Spring-Eased Cursor, Typewriter Scrolling & Local Ambient Engine (v1.11.3)
    Crafted by letschips (Xiaohongshu)
    ========================================================================== */
 
@@ -382,6 +382,8 @@ async function discoverVaultCrispLicenses(app, targetPluginId, limit, verifyLoca
     add(p?.settings?.licenseKey);
     add(p?.data?.licenseCode);
     add(p?.data?.licenseKey);
+    add(p?.options?.licenseCode);
+    add(p?.licenseKey);
   }
   try {
     const adapter = app.vault?.adapter;
@@ -397,6 +399,8 @@ async function discoverVaultCrispLicenses(app, targetPluginId, limit, verifyLoca
           try {
             const data = JSON.parse(await adapter.read(dataPath));
             add(data?.licenseCode || data?.licenseKey || data?.license);
+            // Crisp Pulse keeps its settings nested under `settings`.
+            add(data?.settings?.licenseCode || data?.settings?.licenseKey);
           } catch (e) {
             // a damaged data.json of another plugin is skipped
           }

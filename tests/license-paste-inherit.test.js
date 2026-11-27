@@ -110,3 +110,13 @@ test("scan: forged, wrong-product and other-plugin codes are dropped before any 
   assert.equal(found.length, 0);
   assert.equal(lib.requests.length, 0);
 });
+
+// Crisp Pulse keeps its code under `settings`; Pets and Days keep theirs under `options`.
+test("scan: reads Pulse's nested settings on disk and the options of a loaded sibling", async () => {
+  const { discoverVaultCrispLicenses, verifyLicenseCode: local } = load();
+  const B = makeCode({ licenseId: "TEST-B" });
+  const app = fakeApp({ "crisp-pulse": { settings: { licenseCode: CLEAN } } });
+  assert.deepEqual([...(await discoverVaultCrispLicenses(app, "crisp-focus", 5, local, undefined))], [CLEAN]);
+  app.plugins = { plugins: { "crisp-mind": { options: { licenseCode: B } } } };
+  assert.deepEqual([...(await discoverVaultCrispLicenses(app, "crisp-focus", 5, local, undefined))], [B, CLEAN]);
+});
